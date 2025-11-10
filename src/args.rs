@@ -3,12 +3,32 @@
 #[command(
     name = "weverywhere",
     version = "1.0",
-    about = "A source-code, executable-binary, and web-url security information gathering and reporting utility."
+    about = "A WASI program management tool supporting the execution of WASI binaries everywhere."
 )]
 pub struct Args {
-    /// TODO design input API
-    pub input: Option<String>,
+    #[command(subcommand)]
+    command: Command,
 
 }
+
+#[derive(Debug, clap::Subcommand)]
+pub enum Command {
+    /// Print information about a WASI file, such as function imports and exports
+    Info {
+        /// Path to the WASI file
+        file_path: std::path::PathBuf,
+    },
+
+    /// Run the given WASI file
+    Run {
+        /// Path to the WASI file
+        file_path: std::path::PathBuf,
+
+        /// UDP Multicast address to send to
+        #[arg(short, long, default_value_t = core::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 2)) )]
+        multicast_group: core::net::IpAddr,
+    },
+}
+
 
 
