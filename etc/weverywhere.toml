@@ -1,0 +1,10 @@
+
+
+
+
+
+# This block may be duplicated, it is a list of objects with the property 'path'. All include paths will be glob-resolved and
+# configuration is appled in-order of traversal.
+[[includes]]
+path = "/etc/weverywhere.d/*.toml"
+
