@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+
 [dependencies.clap]
 version = "4"
 features = ["derive"]

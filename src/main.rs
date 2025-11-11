@@ -6,6 +6,7 @@
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 mod args;
+mod config;
 
 fn main() {
     use clap::Parser;
