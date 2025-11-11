@@ -27,6 +27,10 @@ pub enum Command {
         /// UDP Multicast address to send to
         #[arg(short, long, default_value_t = core::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 2)) )]
         multicast_group: core::net::IpAddr,
+
+        /// UDP Multicast address to send to
+        #[arg(short, long, default_value_t = 2240)]
+        port: u16,
     },
 }
 
