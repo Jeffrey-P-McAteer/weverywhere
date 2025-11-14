@@ -1,4 +1,6 @@
 
+// Weverywhere imlements Display for PathBuf
+
 #[derive(Debug, clap::Parser)]
 #[command(
     name = "weverywhere",
@@ -32,7 +34,24 @@ pub enum Command {
         #[arg(short, long, default_value_t = 2240)]
         port: u16,
     },
+
+    /// Listen on the given socket for network messages and execute WASI programs sent to us
+    Serve {
+        /// UDP Multicast address to listen on
+        #[arg(short, long, default_value_t = core::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 2)) )]
+        multicast_group: core::net::IpAddr,
+
+        /// UDP Multicast address to listen on
+        #[arg(short, long, default_value_t = 2240)]
+        port: u16,
+
+        /// Path to the WASI file
+        #[arg(short, long, default_value = "/etc/weverywhere.toml" )]
+        config: std::path::PathBuf,
+    }
+
 }
+
 
 
 
