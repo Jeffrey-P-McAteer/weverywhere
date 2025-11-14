@@ -80,15 +80,20 @@ def find_target_binary(t):
       return c
   raise Exception(f'Cannot find a binary for {t}')
 
+
+if 'RUSTFLAGS' in os.environ:
+  os.environ.pop('RUSTFLAGS')
+
+# rustc --print target-list
 targets = [
   'x86_64-pc-windows-gnu',
   'x86_64-unknown-linux-gnu',
   'x86_64-apple-darwin',
 
   # TODO future R&D stuff
-  #'aarch64-pc-windows-gnu',
-  #'aarch64-unknown-linux-gnu',
-  #'aarch64-apple-darwin',
+  'aarch64-pc-windows-gnullvm',
+  'aarch64-unknown-linux-gnu',
+  'aarch64-apple-darwin',
 ]
 
 for t in targets:
@@ -98,7 +103,6 @@ for t in targets:
   ], check=True)
   out_bin_path = os.path.abspath(find_target_binary(t))
   print(f'[ Built ] {out_bin_path}')
-
 
 
 
