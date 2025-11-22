@@ -35,7 +35,7 @@ fn main() {
 
 async fn async_main(args: &mut args::Args) -> DynResult<()> {
 
-    command::run(&args.command, &args).await?;
+    command::run_command(&args.command, &args).await?;
 
     Ok(())
 }
