@@ -25,4 +25,8 @@ version = "38"
 version = "1"
 features = ["full"]
 
+[dependencies.ring]
+version = "0.17"
+features = ["wasm32_unknown_unknown_js"]
+
 

@@ -9,6 +9,7 @@ mod args;
 mod config;
 mod comm;
 mod command;
+mod universal_serde;
 
 fn main() {
     use clap::Parser;

@@ -98,6 +98,10 @@ pub async fn serve(multicast_group: &core::net::IpAddr, port: u16) -> DynResult<
   Ok(())
 }
 
-
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct HelloWorld {
+  pub message: String,
+  pub misc: u32,
+}
 
 

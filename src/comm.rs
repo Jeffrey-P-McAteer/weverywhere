@@ -1,4 +1,11 @@
 
+/****
+ *
+ * This is the future home of a UPv4+IPV6+Unix Socket agnostic transport protocol which does not exist yet.
+ * Some of the Peer-to-peer identity stuff may be cribbed from the new net_comms.rs file, which is our
+ * playground for ipv4 multicast crypto stuff.
+ *
+ **/
 
 /// Terminals are used to refer to single-hosts. They
 /// have a single PKI identity and act as the verticies of network graphs
