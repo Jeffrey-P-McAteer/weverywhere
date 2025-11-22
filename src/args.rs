@@ -14,6 +14,10 @@ pub struct Args {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbosity: u8,
 
+    /// Path to the WASI file
+    #[arg(short, long, default_value = "/etc/weverywhere.toml" )]
+    config: std::path::PathBuf,
+
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -48,9 +52,6 @@ pub enum Command {
         #[arg(short, long, default_value_t = 2240)]
         port: u16,
 
-        /// Path to the WASI file
-        #[arg(short, long, default_value = "/etc/weverywhere.toml" )]
-        config: std::path::PathBuf,
     }
 
 }
