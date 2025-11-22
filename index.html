@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>weverywhere - Download</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 80pt 0pt 0pt 0pt;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        h1, h2, h3 {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            padding: 40px;
+            max-width: 600px;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+        .download-section {
+            margin: 30px 0;
+        }
+        .download-button-holder {
+            display: flex;
+            flex-direction: row;
+        }
+        .download-button {
+            /*display: inline-block;*/
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            padding: 15px 30px;
+            border-radius: 8px;
+            margin: 10px;
+            font-weight: bold;
+            font-size: 1.1em;
+            transition: transform 0.2s, box-shadow 0.2s;
+            min-width: 200px;
+            display: flex;
+            align-items: center;   /* Vertically centers items */
+            justify-content: center; /* Horizontally centers items (optional) */
+            text-decoration: none; /* Removes underline */
+            gap: 8px; /* Space between image and text */
+            flex-direction: row;
+            width: 35%;
+        }
+        .download-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        .platform-icon {
+            margin-right: 8px;
+            font-size: 1.2em;
+        }
+        .file-info {
+            font-size: 0.9em;
+            color: #888;
+            margin-top: 5px;
+        }
+        .controls {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 30px;
+            text-align: left;
+        }
+        .controls h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .controls ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .controls li {
+            margin: 5px 0;
+            color: #555;
+        }
+        .project-status {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 30px;
+            text-align: left;
+        }
+        .project-status h3 {
+            margin-top: 0;
+            color: #333;
+        }
+        .chart-container {
+            margin: 20px 0;
+            max-width: 100%;
+            overflow: hidden;
+        }
+        .chart-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+            color: #888;
+            font-size: 0.9em;
+        }
+        /* Mobile Style Adjustments */
+        @media (max-aspect-ratio: 1/1) {
+            .download-button-holder {
+                flex-direction: column;
+            }
+            .download-button {
+                width: 80%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>weverywhere</h1>
+        <p class="subtitle">
+             TODO docs et al
+        </p>
+
+        <div class="download-section">
+            <h2>Download Latest Release</h2>
+            <div class="download-button-holder">
+                <!-- <a href="FullCrisis3.linux.x64" class="download-button">
+                    <img class="platform-icon" src="linux-icon.png" width="64" height="64" />
+                    <span>Linux x64</span>
+                </a>
+
+                <a href="FullCrisis3.win.x64.exe" class="download-button">
+                    <img class="platform-icon" src="windows-icon.png" width="64" height="64" />
+                    <span>Windows x64</span>
+                </a> -->
+            </div>
+        </div>
+
+
+        <div class="project-status">
+            <h3>Code</h3>
+            <p>
+                Code for this project resides at
+                <a href="https://github.com/Jeffrey-P-McAteer/weverywhere">github.com/Jeffrey-P-McAteer/weverywhere</a>.
+            </p>
+        </div>
+
+        <div class="footer">
+            <p>Built at 2025-11-22 09:23 from 4b72026</p>
+        </div>
+    </div>
+</body>
+</html>
