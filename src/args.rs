@@ -11,6 +11,9 @@ pub struct Args {
     #[command(subcommand)]
     command: Command,
 
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbosity: u8,
+
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -53,5 +56,15 @@ pub enum Command {
 }
 
 
-
+impl Args {
+    pub fn v_is_info(&self) -> bool {
+        return self.verbosity > 0;
+    }
+    pub fn v_is_debug(&self) -> bool {
+        return self.verbosity > 1;
+    }
+    pub fn v_is_everything(&self) -> bool {
+        return self.verbosity > 2;
+    }
+}
 

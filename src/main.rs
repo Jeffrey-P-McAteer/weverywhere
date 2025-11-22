@@ -13,7 +13,11 @@ fn main() {
     use clap::Parser;
     let args = args::Args::parse();
 
-    println!("Hello, world!");
-    println!("args={:?}", args);
+    if args.v_is_debug() {
+        println!("args={:?}", args);
+    }
+
+
+
 }
 
