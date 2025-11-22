@@ -53,6 +53,16 @@ This is a single rust binary.
  - Source code lives under `./src/*`
  - Example server configuration lies under `./etc/*` and is embedded into the binary; sample config may be extracted to your system with a sub-command (see `weverywhere --help` for details).
  - Example WASMI programs are under `./example-programs/` and may be compiled with `uv run compile-example-programs.py` into `./target/example-programs/<NAME>.wasi`
+ - `update-github-pages.py` does what it says on the tin, and is currently a big mess copied from another project.
+ - `zig-build-all-targets.py` may be used to cross-compile the rust code on a Linux x86_64 host to all platforms (Mac/Windows/Linux x86_64 and ARM64)
+
+# Project-level Missing Pieces and TODOs
+
+ - [ ] Binary signing
+ - [ ] `update-github-pages.py` website rendering
+    - [ ] icons for architectures needed
+    - [ ] download buttons
+    - [ ] documentation rendering would be great
 
 
 

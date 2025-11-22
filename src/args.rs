@@ -9,14 +9,14 @@
 )]
 pub struct Args {
     #[command(subcommand)]
-    command: Command,
+    pub command: Command,
 
     #[arg(short, long, action = clap::ArgAction::Count)]
-    verbosity: u8,
+    pub verbosity: u8,
 
     /// Path to the WASI file
     #[arg(short, long, default_value = "/etc/weverywhere.toml" )]
-    config: std::path::PathBuf,
+    pub config: std::path::PathBuf,
 
 }
 
@@ -26,6 +26,19 @@ pub enum Command {
     Info {
         /// Path to the WASI file
         file_path: std::path::PathBuf,
+    },
+
+    InstallTo {
+        /// Path to root of system to install into.
+        /// This generally must run as root and will write to files under etc/ and bin/
+        /// within the folder, unless --install-etc and or --install-bin are passed.
+        install_root: std::path::PathBuf,
+
+        #[arg(long)]
+        install_etc: Option<std::path::PathBuf>,
+
+        #[arg(long)]
+        install_bin: Option<std::path::PathBuf>,
     },
 
     /// Run the given WASI file

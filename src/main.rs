@@ -8,6 +8,7 @@ type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
 mod args;
 mod config;
 mod comm;
+mod command;
 
 fn main() {
     use clap::Parser;
@@ -34,7 +35,7 @@ fn main() {
 
 async fn async_main(args: &mut args::Args) -> DynResult<()> {
 
-
+    command::run(&args.command, &args).await?;
 
     Ok(())
 }
