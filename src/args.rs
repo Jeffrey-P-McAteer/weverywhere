@@ -105,11 +105,14 @@ pub struct MulticastAddressVec(Vec<core::net::IpAddr>);
 
 impl std::fmt::Display for MulticastAddressVec {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "[")?;
-        for addr in self.0.iter() {
-            write!(f, "{}", addr)?;
-        }
-        write!(f, "]")
+        let fmt_output: String = self.0.iter()
+                             .map(|addr| format!("{}", addr) )
+                             .collect::<Vec<_>>() // replace these 2 lines w/ commented ones when intersperse becomes stable!
+                             .join(",");
+                             //.intersperse(",".to_string())
+                             //.collect();
+
+        write!(f, "{}", fmt_output)
     }
 }
 
@@ -128,7 +131,7 @@ impl std::str::FromStr for MulticastAddressVec {
                     }
                 }
                 Err(e) => {
-                    eprintln!("{:?}", e);
+                    eprintln!("Error: {:?}", e);
                 }
             }
         }
