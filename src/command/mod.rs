@@ -60,8 +60,24 @@ pub async fn run(file_path: &std::path::PathBuf, multicast_group: &core::net::Ip
   let len = sock.send_to(b"test 111111 test 222222 test 333333", (*multicast_group, port)).await?;
   println!("{:?} bytes sent", len);
 
-  let len = sock.recv(&mut buf).await?;
-  println!("{:?} bytes received from {:?} => {:?}", len, multicast_group, &buf[0..len]);
+  let td = tokio::time::Duration::from_millis(100);
+
+  for _ in 0..24 {
+    // Only wait up to 100ms for a reply;
+    match tokio::time::timeout(td, sock.recv(&mut buf)).await {
+      Ok(Ok(len)) => {
+        println!("{:?} bytes received from {:?} => {:?}", len, multicast_group, &buf[0..len]);
+      }
+      Ok(Err(e)) => {
+        // The socket operation itself failed
+        eprintln!("Socket error: {e}");
+      }
+      Err(_) => {
+        // The timeout expired (no data within 100ms)
+        // println!("Timed out");
+      }
+    }
+  }
 
   Ok(())
 }
@@ -72,7 +88,7 @@ pub async fn serve(multicast_group: &core::net::IpAddr, port: u16) -> DynResult<
 
   println!("Binding to {}:{}", multicast_group, port);
 
-  let sock = tokio::net::UdpSocket::bind((*multicast_group, port)).await?;
+  let sock = tokio::net::UdpSocket::bind( "0.0.0.0:0" ).await?;
 
   sock.set_multicast_loop_v4(true)?;
   sock.set_multicast_ttl_v4(1)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
