@@ -11,11 +11,11 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
     Command::InstallTo { install_root, install_etc, install_bin } => {
       install_to(install_root, install_etc, install_bin).await?;
     }
-    Command::Run { file_path, multicast_group, port } => {
-      run(file_path, multicast_group, *port).await?;
+    Command::Run { file_path, multicast_groups, port } => {
+      run(file_path, multicast_groups, *port).await?;
     }
-    Command::Serve { multicast_group, port } => {
-      serve(multicast_group, *port).await?;
+    Command::Serve { multicast_groups, port } => {
+      serve(multicast_groups, *port).await?;
     }
   }
 
@@ -33,9 +33,12 @@ pub async fn install_to(install_root: &std::path::PathBuf, install_etc: &Option<
   Ok(())
 }
 
-pub async fn run(file_path: &std::path::PathBuf, multicast_group: &core::net::IpAddr, port: u16) -> DynResult<()> {
+pub async fn run(file_path: &std::path::PathBuf, multicast_groups: &args::MulticastAddressVec, port: u16) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
+  println!("Todo iterate ifaces and {:?} for port port", multicast_groups);
+
+  /*
   println!("Sending to {}:{}", multicast_group, port);
 
   // TODO v6+v4 auto-detect?
@@ -77,15 +80,22 @@ pub async fn run(file_path: &std::path::PathBuf, multicast_group: &core::net::Ip
         // println!("Timed out");
       }
     }
-  }
+  }*/
 
   Ok(())
 }
 
 #[allow(unreachable_code)]
-pub async fn serve(multicast_group: &core::net::IpAddr, port: u16) -> DynResult<()> {
+pub async fn serve(multicast_group: &args::MulticastAddressVec, port: u16) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
+  for iface in get_if_addrs::get_if_addrs()? {
+    for multicast_addr in multicast_group.iter() {
+      println!("Binding to {: <18} address {} port {}", iface.name, multicast_addr, port);
+    }
+  }
+
+  /*
   println!("Binding to {}:{}", multicast_group, port);
 
   let sock = tokio::net::UdpSocket::bind( "0.0.0.0:0" ).await?;
@@ -107,12 +117,13 @@ pub async fn serve(multicast_group: &core::net::IpAddr, port: u16) -> DynResult<
       let (len, addr) = sock.recv_from(&mut buf).await?;
       println!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
 
-      sock.connect(addr).await?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
+      //sock.connect(addr).await?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
 
       let len = sock.send_to(&buf[..len], addr).await?;
       println!("{:?} bytes sent", len);
 
   }
+  */
 
   Ok(())
 }
@@ -122,5 +133,6 @@ pub struct HelloWorld {
   pub message: String,
   pub misc: u32,
 }
+
 
 

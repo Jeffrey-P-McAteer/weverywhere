@@ -1,6 +1,10 @@
 
 // Weverywhere imlements Display for PathBuf
 
+use std::ops::DerefMut;
+use std::ops::Deref;
+use std::str::FromStr;
+
 #[derive(Debug, clap::Parser)]
 #[command(
     name = "weverywhere",
@@ -46,9 +50,9 @@ pub enum Command {
         /// Path to the WASI file
         file_path: std::path::PathBuf,
 
-        /// UDP Multicast address to send to
-        #[arg(short, long, default_value_t = core::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 2)) )]
-        multicast_group: core::net::IpAddr,
+        /// UDP Multicast addresses to send to
+        #[arg(short, long, default_value_t = default_multicast_groups() )]
+        multicast_groups: MulticastAddressVec,
 
         /// UDP Multicast address to send to
         #[arg(short, long, default_value_t = 2240)]
@@ -57,9 +61,9 @@ pub enum Command {
 
     /// Listen on the given socket for network messages and execute WASI programs sent to us
     Serve {
-        /// UDP Multicast address to listen on
-        #[arg(short, long, default_value_t = core::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 2)) )]
-        multicast_group: core::net::IpAddr,
+        /// UDP Multicast addresses to listen on
+        #[arg(short, long, default_value_t = default_multicast_groups() )]
+        multicast_groups: MulticastAddressVec,
 
         /// UDP Multicast address to listen on
         #[arg(short, long, default_value_t = 2240)]
@@ -67,6 +71,20 @@ pub enum Command {
 
     }
 
+}
+
+fn default_multicast_groups() -> MulticastAddressVec {
+    let mut groups = Vec::with_capacity(2);
+    groups.push(core::net::IpAddr::V4(std::net::Ipv4Addr::new(
+        // "Unassigned" per https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml
+        224, 0, 0, 3
+    )));
+    groups.push(core::net::IpAddr::V6(std::net::Ipv6Addr::new(
+        // "Unassigned" per https://www.iana.org/assignments/ipv6-multicast-addresses/ipv6-multicast-addresses.xhtml
+        0xFF02, 0x0000, 0x0000, 0x0000,
+        0x0000, 0x0000, 0x0000, 0x0003
+    )));
+    MulticastAddressVec(groups)
 }
 
 
@@ -80,5 +98,81 @@ impl Args {
     pub fn v_is_everything(&self) -> bool {
         return self.verbosity > 2;
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct MulticastAddressVec(Vec<core::net::IpAddr>);
+
+impl std::fmt::Display for MulticastAddressVec {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "[")?;
+        for addr in self.0.iter() {
+            write!(f, "{}", addr)?;
+        }
+        write!(f, "]")
+    }
+}
+
+impl std::str::FromStr for MulticastAddressVec {
+    type Err = Box<dyn std::error::Error>;
+    fn from_str(s: &str) -> Result<Self, <Self as std::str::FromStr>::Err> {
+        let mut groups = Vec::with_capacity(4);
+        for part in s.split([' ', ',']) {
+            match core::net::IpAddr::from_str(part) {
+                Ok(addr) => {
+                    if addr.is_multicast() {
+                        groups.push(addr);
+                    }
+                    else {
+                        eprintln!("WARNING: Ignoring non-multicast address {}", addr);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{:?}", e);
+                }
+            }
+        }
+        if groups.len() > 0 {
+            Ok(MulticastAddressVec(groups))
+        }
+        else {
+            Err(format!("Error: {} did not specify ANY multicast addresses", s).into())
+        }
+    }
+}
+
+impl From<String> for MulticastAddressVec {
+    fn from(s: std::string::String) -> Self {
+        match MulticastAddressVec::from_str(&s) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                eprintln!("{:?}", e);
+                default_multicast_groups()
+            }
+        }
+    }
+}
+
+impl IntoIterator for MulticastAddressVec {
+  type Item = core::net::IpAddr;
+  type IntoIter = <Vec<core::net::IpAddr> as IntoIterator>::IntoIter; // so that you don't have to write std::vec::IntoIter, which nobody remembers anyway
+
+  fn into_iter(self) -> Self::IntoIter {
+    self.0.into_iter()
+  }
+}
+
+// We deref to slice so that we can reuse the slice impls
+impl Deref for MulticastAddressVec {
+  type Target = [core::net::IpAddr];
+
+  fn deref(&self) -> &[core::net::IpAddr] {
+    &self.0[..]
+  }
+}
+impl DerefMut for MulticastAddressVec {
+  fn deref_mut(&mut self) -> &mut [core::net::IpAddr] {
+    &mut self.0[..]
+  }
 }
 
