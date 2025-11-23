@@ -107,8 +107,11 @@ pub async fn serve(multicast_group: &core::net::IpAddr, port: u16) -> DynResult<
       let (len, addr) = sock.recv_from(&mut buf).await?;
       println!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
 
+      sock.connect(addr).await?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
+
       let len = sock.send_to(&buf[..len], addr).await?;
       println!("{:?} bytes sent", len);
+
   }
 
   Ok(())
