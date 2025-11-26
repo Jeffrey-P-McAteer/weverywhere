@@ -75,11 +75,11 @@ pub enum Command {
 
 fn default_multicast_groups() -> MulticastAddressVec {
     let mut groups = Vec::with_capacity(2);
-    groups.push(core::net::IpAddr::V4(std::net::Ipv4Addr::new(
+    groups.push(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
         // "Unassigned" per https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml
         224, 0, 0, 3
     )));
-    groups.push(core::net::IpAddr::V6(std::net::Ipv6Addr::new(
+    groups.push(std::net::IpAddr::V6(std::net::Ipv6Addr::new(
         // "Unassigned" per https://www.iana.org/assignments/ipv6-multicast-addresses/ipv6-multicast-addresses.xhtml
         0xFF02, 0x0000, 0x0000, 0x0000,
         0x0000, 0x0000, 0x0000, 0x0003
@@ -101,7 +101,7 @@ impl Args {
 }
 
 #[derive(Debug, Clone)]
-pub struct MulticastAddressVec(Vec<core::net::IpAddr>);
+pub struct MulticastAddressVec(Vec<std::net::IpAddr>);
 
 impl std::fmt::Display for MulticastAddressVec {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -121,7 +121,7 @@ impl std::str::FromStr for MulticastAddressVec {
     fn from_str(s: &str) -> Result<Self, <Self as std::str::FromStr>::Err> {
         let mut groups = Vec::with_capacity(4);
         for part in s.split([' ', ',']) {
-            match core::net::IpAddr::from_str(part) {
+            match std::net::IpAddr::from_str(part) {
                 Ok(addr) => {
                     if addr.is_multicast() {
                         groups.push(addr);
@@ -157,8 +157,8 @@ impl From<String> for MulticastAddressVec {
 }
 
 impl IntoIterator for MulticastAddressVec {
-  type Item = core::net::IpAddr;
-  type IntoIter = <Vec<core::net::IpAddr> as IntoIterator>::IntoIter; // so that you don't have to write std::vec::IntoIter, which nobody remembers anyway
+  type Item = std::net::IpAddr;
+  type IntoIter = <Vec<std::net::IpAddr> as IntoIterator>::IntoIter; // so that you don't have to write std::vec::IntoIter, which nobody remembers anyway
 
   fn into_iter(self) -> Self::IntoIter {
     self.0.into_iter()
@@ -167,14 +167,14 @@ impl IntoIterator for MulticastAddressVec {
 
 // We deref to slice so that we can reuse the slice impls
 impl Deref for MulticastAddressVec {
-  type Target = [core::net::IpAddr];
+  type Target = [std::net::IpAddr];
 
-  fn deref(&self) -> &[core::net::IpAddr] {
+  fn deref(&self) -> &[std::net::IpAddr] {
     &self.0[..]
   }
 }
 impl DerefMut for MulticastAddressVec {
-  fn deref_mut(&mut self) -> &mut [core::net::IpAddr] {
+  fn deref_mut(&mut self) -> &mut [std::net::IpAddr] {
     &mut self.0[..]
   }
 }
