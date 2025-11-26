@@ -111,36 +111,6 @@ pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> Dyn
 
   tasks.join_all().await;
 
-  /*
-  println!("Binding to {}:{}", multicast_group, port);
-
-  let sock = tokio::net::UdpSocket::bind( "0.0.0.0:0" ).await?;
-
-  sock.set_multicast_loop_v4(true)?;
-  sock.set_multicast_ttl_v4(1)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
-
-  match multicast_group {
-    std::net::IpAddr::V4(multicast_group) => {
-      sock.join_multicast_v4(*multicast_group, core::net::Ipv4Addr::UNSPECIFIED)?;
-    }
-    std::net::IpAddr::V6(multicast_group) => {
-      sock.join_multicast_v6(multicast_group, 0 /* unspecified */)?;
-    }
-  }
-
-  let mut buf = [0; 16*1024];
-  loop {
-      let (len, addr) = sock.recv_from(&mut buf).await?;
-      println!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
-
-      //sock.connect(addr).await?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
-
-      let len = sock.send_to(&buf[..len], addr).await?;
-      println!("{:?} bytes sent", len);
-
-  }
-  */
-
   Ok(())
 }
 
