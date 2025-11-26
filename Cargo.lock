@@ -1789,6 +1789,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "get_if_addrs",
+ "libc",
  "ring",
  "serde",
  "serde_bare",

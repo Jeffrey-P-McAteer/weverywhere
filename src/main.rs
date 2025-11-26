@@ -10,6 +10,7 @@ mod config;
 mod comm;
 mod command;
 mod universal_serde;
+mod net_utils;
 
 fn main() {
     use clap::Parser;
