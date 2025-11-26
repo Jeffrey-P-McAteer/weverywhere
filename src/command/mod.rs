@@ -36,17 +36,47 @@ pub async fn install_to(install_root: &std::path::PathBuf, install_etc: &Option<
 pub async fn run(file_path: &std::path::PathBuf, multicast_groups: args::MulticastAddressVec, port: u16) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
-  println!("Todo iterate ifaces and {:?} for port port", multicast_groups);
+  let mut tasks = tokio::task::JoinSet::new();
+  for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
+    for multicast_addr in multicast_groups.iter() {
+      if iface_addrs.len() < 1 {
+        // We assume 0 addresses means no network connection, so we skip the interface entirely.
+        continue;
+      }
+      // Clone locals to appease async gods
+      let file_path = file_path.clone();
+      let iface_idx = iface_idx.clone();
+      let iface_name = iface_name.clone();
+      let iface_addrs = iface_addrs.clone();
+      let multicast_addr = multicast_addr.clone();
+      tasks.spawn(async move {
+        if let Err(e) = run_one_iface(&file_path, iface_idx, &iface_name, &iface_addrs, &multicast_addr, port).await {
+          eprintln!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
+        }
+      });
+    }
+  }
 
-  /*
-  println!("Sending to {}:{}", multicast_group, port);
+  tasks.join_all().await;
 
-  // TODO v6+v4 auto-detect?
-  //let sock = tokio::net::UdpSocket::bind( "[::]:0" ).await?;
-  let sock = tokio::net::UdpSocket::bind( "0.0.0.0:0" ).await?;
+  Ok(())
+}
 
-  sock.set_multicast_loop_v4(true)?;
-  sock.set_multicast_ttl_v4(1)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
+pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std::net::IpAddr>, multicast_group: &std::net::IpAddr, port: u16) -> DynResult<()> {
+
+  let empty_bind_addr_port = if multicast_group.is_ipv4() {
+    (std::net::IpAddr::V4(core::net::Ipv4Addr::new(0, 0, 0, 0)), 0 )
+  }
+  else {
+    (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), 0 )
+  };
+
+  let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
+
+  if multicast_group.is_ipv4() {
+    sock.set_multicast_loop_v4(true)?;
+    sock.set_multicast_ttl_v4(1)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
+  }
 
   match multicast_group {
     std::net::IpAddr::V4(multicast_group) => {
@@ -80,15 +110,16 @@ pub async fn run(file_path: &std::path::PathBuf, multicast_groups: args::Multica
         // println!("Timed out");
       }
     }
-  }*/
+  }
 
   Ok(())
 }
 
+
+
+
 #[allow(unreachable_code)]
 pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> DynResult<()> {
-  use tokio::net::ToSocketAddrs;
-
   let mut tasks = tokio::task::JoinSet::new();
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_group.iter() {
