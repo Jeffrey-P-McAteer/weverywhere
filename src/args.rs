@@ -127,11 +127,11 @@ impl std::str::FromStr for MulticastAddressVec {
                         groups.push(addr);
                     }
                     else {
-                        eprintln!("WARNING: Ignoring non-multicast address {}", addr);
+                        tracing::warn!("WARNING: Ignoring non-multicast address {}", addr);
                     }
                 }
                 Err(e) => {
-                    eprintln!("Error: {:?}", e);
+                    tracing::warn!("Error: {:?}", e);
                 }
             }
         }
@@ -149,7 +149,7 @@ impl From<String> for MulticastAddressVec {
         match MulticastAddressVec::from_str(&s) {
             Ok(parsed) => parsed,
             Err(e) => {
-                eprintln!("{:?}", e);
+                tracing::warn!("{:?}", e);
                 default_multicast_groups()
             }
         }

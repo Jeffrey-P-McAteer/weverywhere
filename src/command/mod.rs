@@ -23,13 +23,13 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
 }
 
 pub async fn info(file_path: &std::path::PathBuf) -> DynResult<()> {
-  eprintln!("This has not been implemented yet, see {}:{}", file!(), line!());
+  tracing::warn!("This has not been implemented yet, see {}:{}", file!(), line!());
 
   Ok(())
 }
 
 pub async fn install_to(install_root: &std::path::PathBuf, install_etc: &Option<std::path::PathBuf>, install_bin: &Option<std::path::PathBuf>) -> DynResult<()> {
-  eprintln!("This has not been implemented yet, see {}:{}", file!(), line!());
+  tracing::warn!("This has not been implemented yet, see {}:{}", file!(), line!());
   Ok(())
 }
 
@@ -51,7 +51,7 @@ pub async fn run(file_path: &std::path::PathBuf, multicast_groups: args::Multica
       let multicast_addr = multicast_addr.clone();
       tasks.spawn(async move {
         if let Err(e) = run_one_iface(&file_path, iface_idx, &iface_name, &iface_addrs, &multicast_addr, port).await {
-          eprintln!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
+          tracing::warn!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
         }
       });
     }
@@ -65,7 +65,7 @@ pub async fn run(file_path: &std::path::PathBuf, multicast_groups: args::Multica
 pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std::net::IpAddr>, multicast_group: &std::net::IpAddr, port: u16) -> DynResult<()> {
 
   if crate::v_is_info() {
-    println!("Sending {} bytes to {:?} port {} on iface {} ({:?})", 999, multicast_group, port, iface_name, iface_addrs);
+    tracing::warn!("Sending {} bytes to {:?} port {} on iface {} ({:?})", 999, multicast_group, port, iface_name, iface_addrs);
   }
 
   let empty_bind_addr_port = if multicast_group.is_ipv4() {
@@ -102,7 +102,7 @@ pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface
   let mut buf = [0; 1024];
 
   let len = sock.send_to(b"test 111111 test 222222 test 333333", (*multicast_group, port)).await?;
-  println!("{:?} bytes sent", len);
+  tracing::warn!("{:?} bytes sent", len);
 
   let td = tokio::time::Duration::from_millis(100);
 
@@ -110,15 +110,15 @@ pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface
     // Only wait up to 100ms for a reply;
     match tokio::time::timeout(td, sock.recv(&mut buf)).await {
       Ok(Ok(len)) => {
-        println!("{:?} bytes received from {:?} => {:?}", len, multicast_group, &buf[0..len]);
+        tracing::warn!("{:?} bytes received from {:?} => {:?}", len, multicast_group, &buf[0..len]);
       }
       Ok(Err(e)) => {
         // The socket operation itself failed
-        eprintln!("Socket error: {e}");
+        tracing::warn!("Socket error: {e}");
       }
       Err(_) => {
         // The timeout expired (no data within 100ms)
-        // println!("Timed out");
+        // tracing::warn!("Timed out");
       }
     }
   }
@@ -145,7 +145,10 @@ pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> Dyn
       let multicast_addr = multicast_addr.clone();
       tasks.spawn(async move {
         if let Err(e) = serve_iface(iface_idx, &iface_name, &iface_addrs, &multicast_addr, port).await {
-          eprintln!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
+          if e.kind == AddrInUse {
+
+          }
+          tracing::warn!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
         }
       });
     }
@@ -161,7 +164,7 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
   use tokio::net::ToSocketAddrs;
 
   if crate::v_is_info() {
-    println!("Binding to {} - {: <18} address {} port {} (addresses - {:?})", iface_idx, iface_name, multicast_addr, port, iface_addrs);
+    tracing::warn!("Binding to {} - {: <18} address {} port {} (addresses - {:?})", iface_idx, iface_name, multicast_addr, port, iface_addrs);
   }
 
   let empty_bind_addr_port = if multicast_addr.is_ipv4() {
@@ -214,12 +217,12 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
   let mut buf = [0; 16*1024];
   loop {
       let (len, addr) = sock.recv_from(&mut buf).await?;
-      println!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
+      tracing::warn!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
 
       //sock.connect(addr).await?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
 
       let len = sock.send_to(&buf[..len], addr).await?;
-      println!("{:?} bytes sent", len);
+      tracing::warn!("{:?} bytes sent", len);
 
   }
 

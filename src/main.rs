@@ -17,6 +17,7 @@ fn main() {
     let mut args = args::Args::parse();
 
     GLOBAL_VERBOSITY.store(args.verbosity.into(), std::sync::atomic::Ordering::Relaxed);
+    let log_guard = init_logging();
 
     if args.v_is_debug() {
         println!("args={:#?}", args);
@@ -65,4 +66,21 @@ pub fn v_is_everything() -> bool {
     return get_global_verbosity() > 2;
 }
 
+
+fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
+
+    // Set up an async writer to stderr
+    let (nb, guard) = tracing_appender::non_blocking(std::io::stderr());
+
+    tracing_subscriber::fmt()
+        .with_writer(nb) // Log format config below
+        .without_time()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_level(false)
+        .init();
+
+    guard
+}
 
