@@ -36,6 +36,10 @@ pub async fn install_to(install_root: &std::path::PathBuf, install_etc: &Option<
 pub async fn run(file_path: &std::path::PathBuf, multicast_groups: args::MulticastAddressVec, port: u16) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
+  // Step 1: Read the executable material & form an exeute request object, sign it, and transmit.
+
+
+  // Step 2: Transmit to all multicast groups on all interfaces
   let mut tasks = tokio::task::JoinSet::new();
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_groups.iter() {
@@ -220,14 +224,6 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
   Ok(())
 }
 
-
-
-
-#[derive(serde::Deserialize, serde::Serialize)]
-pub struct HelloWorld {
-  pub message: String,
-  pub misc: u32,
-}
 
 
 

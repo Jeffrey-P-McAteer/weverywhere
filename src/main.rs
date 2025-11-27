@@ -11,12 +11,14 @@ mod comm;
 mod command;
 mod universal_serde;
 mod net_utils;
+mod messages;
+mod crypto_utils;
 
 fn main() {
     use clap::Parser;
     let mut args = args::Args::parse();
 
-    GLOBAL_VERBOSITY.store(args.verbosity.into(), std::sync::atomic::Ordering::Relaxed);
+    GLOBAL_VERBOSITY.set(args.verbosity.into()).expect("Failed to assign GLOBAL_VERBOSITY");
     let log_guard = init_logging();
 
     if args.v_is_debug() {
@@ -49,12 +51,10 @@ async fn async_main(args: &mut args::Args) -> DynResult<()> {
 
 
 
-
-
 /// If we don't want to pay the cost of plumbing args::Args down into a bajillion function calls, we store the verbosity globally.
-pub static GLOBAL_VERBOSITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static GLOBAL_VERBOSITY: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 fn get_global_verbosity() -> u8 {
-    GLOBAL_VERBOSITY.load(std::sync::atomic::Ordering::Relaxed) as u8
+    *GLOBAL_VERBOSITY.get().unwrap_or_else(|| &0u8)
 }
 pub fn v_is_info() -> bool {
     return get_global_verbosity() > 0;
