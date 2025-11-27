@@ -145,8 +145,10 @@ pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> Dyn
       let multicast_addr = multicast_addr.clone();
       tasks.spawn(async move {
         if let Err(e) = serve_iface(iface_idx, &iface_name, &iface_addrs, &multicast_addr, port).await {
-          if e.kind == AddrInUse {
-
+          if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == std::io::ErrorKind::AddrInUse {
+              return; // Don't bother warning, we see this w/ ipv6 link-local addresses.
+            }
           }
           tracing::warn!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
         }
@@ -173,17 +175,6 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
   else {
     (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), port )
   };
-
-  // for addr in iface_addrs.iter() {
-  //   if addr.is_ipv4() && multicast_addr.is_ipv4() {
-  //     empty_bind_addr_port = (addr.clone(), empty_bind_addr_port.1);
-  //     break;
-  //   }
-  //   else if addr.is_ipv6() && multicast_addr.is_ipv6() {
-  //     empty_bind_addr_port = (addr.clone(), empty_bind_addr_port.1);
-  //     break;
-  //   }
-  // }
 
   //let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
   let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
