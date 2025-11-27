@@ -69,20 +69,20 @@ pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface
   }
 
   let empty_bind_addr_port = if multicast_group.is_ipv4() {
-    (std::net::IpAddr::V4(core::net::Ipv4Addr::new(0, 0, 0, 0)), port )
+    (std::net::IpAddr::V4(core::net::Ipv4Addr::new(0, 0, 0, 0)), 0 )
   }
   else {
-    (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), port )
+    (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), 0 )
   };
 
   let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
 
   if multicast_group.is_ipv4() {
-    sock.set_multicast_loop_v4(false)?;
+    sock.set_multicast_loop_v4(true)?;
     sock.set_multicast_ttl_v4(4)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
   }
   else {
-    sock.set_multicast_loop_v6(false)?;
+    sock.set_multicast_loop_v6(true)?;
   }
 
   match multicast_group {
@@ -186,11 +186,11 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
   let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
 
   if multicast_addr.is_ipv4() {
-    sock.set_multicast_loop_v4(false)?;
+    sock.set_multicast_loop_v4(true)?;
     sock.set_multicast_ttl_v4(4)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
   }
   else {
-    sock.set_multicast_loop_v6(false)?;
+    sock.set_multicast_loop_v6(true)?;
   }
 
   match multicast_addr {
