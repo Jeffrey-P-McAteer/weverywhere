@@ -13,6 +13,9 @@ pub struct Config {
   pub trusted: Vec<SingleTrustedKey>,
 
   #[serde(default)]
+  pub startup_program: Vec<SingleStartupProgram>,
+
+  #[serde(default)]
   pub includes: Vec<SingleInclude>,
 }
 
@@ -26,6 +29,12 @@ pub struct SingleInclude {
 #[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
 pub struct SingleTrustedKey {
   pub key: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
+#[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
+pub struct SingleStartupProgram {
+  pub wasi_file: String,
 }
 
 
@@ -93,6 +102,7 @@ async fn process_config_override_file(config: &Config, override_file_path: &std:
   let joined_o: ConfigOpt = ConfigOpt {
     identity: fancy_omerge(config_o.identity, override_data.identity)?,
     trusted: fancy_omerge_vec(config_o.trusted, override_data.trusted)?,
+    startup_program: fancy_omerge_vec(config_o.startup_program, override_data.startup_program)?,
     includes: fancy_omerge_vec(config_o.includes, override_data.includes)?,
 
     // TODO other top-level fields here
