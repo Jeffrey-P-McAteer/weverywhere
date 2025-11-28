@@ -12,7 +12,6 @@ pub async fn generate_private_key_ed25519_pem_file(out_path: &std::path::Path) -
     let mut csprng = rand::rngs::OsRng;
     let signing_key = ed25519_dalek::SigningKey::generate(&mut csprng);
 
-
     let private_key_pem = signing_key.to_pkcs8_pem(pkcs8::LineEnding::LF)?;
 
     tokio::fs::write(out_path, private_key_pem).await?;
@@ -51,6 +50,25 @@ pub fn public_key_to_ed25519_vk(public_key: &str) -> DynResult<ed25519_dalek::Ve
         Err("Not an Ed25519 key".into())
     }
 }
+
+pub fn sign_bytes(priv_key: &ed25519_dalek::SigningKey, bytes: &mut[u8]) -> [u8; ed25519_dalek::Signature::BYTE_SIZE] {
+    use ed25519_dalek::Signer;
+    let signature = priv_key.sign(bytes);
+    signature.to_bytes()
+}
+
+pub fn signature_is_valid(verifying_key: ed25519_dalek::VerifyingKey, message_bytes: &[u8], signature_bytes: &[u8; ed25519_dalek::Signature::BYTE_SIZE]) -> bool {
+    match verifying_key.verify_strict(message_bytes, &ed25519_dalek::Signature::from_bytes(signature_bytes)) {
+        Ok(()) => {
+            true
+        }
+        Err(e) => {
+            tracing::info!("{}:{} {:?}", file!(), line!(), e);
+            false
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
