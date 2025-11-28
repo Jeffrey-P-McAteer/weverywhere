@@ -2,6 +2,12 @@
 use crate::*;
 use crate::args::*;
 
+#[derive(Debug, Eq, PartialEq)]
+pub enum ConfigStyle {
+  CreateMissingKeys,
+  DoNotCreateMissingKeys
+}
+
 pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()> {
 
   match cmd {
@@ -9,7 +15,10 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
       info(file_path).await?;
     }
     Command::Configuration { } => {
-      configuration(args).await?;
+      configuration(args, ConfigStyle::DoNotCreateMissingKeys).await?;
+    }
+    Command::GenerateMissingKeys { } => {
+      configuration(args, ConfigStyle::CreateMissingKeys).await?;
     }
     Command::InstallTo { install_root, install_etc, install_bin } => {
       install_to(install_root, install_etc, install_bin).await?;
@@ -31,11 +40,21 @@ pub async fn info(file_path: &std::path::PathBuf) -> DynResult<()> {
   Ok(())
 }
 
-pub async fn configuration(args: &args::Args) -> DynResult<()> {
+pub async fn configuration(args: &args::Args, style: ConfigStyle) -> DynResult<()> {
   match config::Config::read_from_file(&args.config).await {
     Ok(config_struct) => {
       tracing::info!("Configuration from {:?}", args.config);
       tracing::info!("{:#?}", config_struct);
+
+      if style == ConfigStyle::CreateMissingKeys {
+        if !tokio::fs::metadata(&config_struct.identity.key).await.is_ok() {
+          tracing::warn!("The file {:?} does not exist and a new identity will be generated.", &config_struct.identity.key);
+          crypto_utils::generate_private_key_ed25519_pem_file(&config_struct.identity.key).await?;
+        }
+        else {
+          tracing::warn!("The file {:?} already exists, refusing to overwrite with new key material!", &config_struct.identity.key);
+        }
+      }
 
       tracing::info!("read_private_key_ed25519_pem_file = {:#?}", config_struct.identity.read_private_key_ed25519_pem_file().await? );
 
