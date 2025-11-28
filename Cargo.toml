@@ -30,6 +30,7 @@ cryptoki = "0.10"
 pem = "3"
 der = { version = "0.7", features = ["alloc"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
+base64 = "0.13"
 
 [dependencies.serde]
 version = "1.0"

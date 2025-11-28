@@ -56,7 +56,9 @@ pub async fn configuration(args: &args::Args, style: ConfigStyle) -> DynResult<(
         }
       }
 
-      tracing::info!("read_private_key_ed25519_pem_file = {:#?}", config_struct.identity.read_private_key_ed25519_pem_file().await? );
+      let identity_key = config_struct.identity.read_private_key_ed25519_pem_file().await?;
+      tracing::info!("[ Identity Public Key ]");
+      tracing::info!("{}", crypto_utils::format_public_key(&identity_key));
 
     }
     Err(e) => {
