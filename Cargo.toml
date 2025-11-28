@@ -10,11 +10,16 @@ serde_json = "1.0"
 serde_cbor = "0.11"
 serde_bare = "0.5"
 
+serde_merge = "0.1"
+optionable = "0.5"
+
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-appender = "0.2"
 
 getifs = "0.4"
+
+glob = "0.3"
 
 # Crypto implementations; we abstract over multiple backends for signatures, encryption, and validation.
 ed25519-dalek = "2"

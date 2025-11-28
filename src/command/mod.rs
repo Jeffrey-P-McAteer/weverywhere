@@ -34,8 +34,8 @@ pub async fn info(file_path: &std::path::PathBuf) -> DynResult<()> {
 pub async fn configuration(args: &args::Args) -> DynResult<()> {
   match config::Config::read_from_file(&args.config).await {
     Ok(config_struct) => {
-      println!("Configuration from {:?}", args.config);
-      println!("{:#?}", config_struct);
+      tracing::info!("Configuration from {:?}", args.config);
+      tracing::info!("{:#?}", config_struct);
 
     }
     Err(e) => {
