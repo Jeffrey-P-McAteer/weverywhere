@@ -37,6 +37,8 @@ pub async fn configuration(args: &args::Args) -> DynResult<()> {
       tracing::info!("Configuration from {:?}", args.config);
       tracing::info!("{:#?}", config_struct);
 
+      tracing::info!("read_private_key_ed25519_pem_file = {:#?}", config_struct.identity.read_private_key_ed25519_pem_file().await? );
+
     }
     Err(e) => {
       tracing::warn!("Failed to parse the config file {:?}", args.config);

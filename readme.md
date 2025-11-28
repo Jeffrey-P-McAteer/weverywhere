@@ -65,7 +65,13 @@ This is a single rust binary.
     - [ ] documentation rendering would be great
 
 
+# Misc One-Liners for testing
 
+```bash
+openssl genpkey -algorithm ed25519 -out /tmp/weverywhere-test.pem
+
+
+```
 
 
 

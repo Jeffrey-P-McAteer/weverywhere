@@ -3,33 +3,6 @@ use crate::*;
 
 use optionable::OptionableConvert;
 
-#[allow(non_camel_case_types)]
-#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "pki_type", content = "pki_details")]
-pub enum PKI_Type {
-  /// The security of your system is dependent on who can read this file - ensure you protect it!
-  ED25519_File { private_key_file: std::path::PathBuf },
-
-  /// The security of your system is dependent on your sources of entropy available.
-  /// These will typically be fine (unless run in a VM where you do not trust the hypervisor).
-  /// Note that your identity is temporary - when the process exits, your identity ceases to exist.
-  #[default]
-  ED25519_Random,
-
-  /// The security of your system is dependent on your CPUs TPM, or the TPM implemented by your Hypervisor if you are a VM.
-  TPM2,
-
-  /// The security of your system is dependent on your FIDO2 token manufacturer and the physical FIDO2 USB peripheral you have plugged in;
-  /// note that this will typically require a physical presence to perform cryptographic tasks.
-  FIDO2,
-
-  /// The security of your system is dependent on your Smartcard manufacturer and the physical smartcard you have plugged in;
-  /// note that this will typically require a PIN code to perform cryptographic tasks. Hard-coding a PIN is an option
-  /// with this library, but is not recommended. If a pin is not specified one must be entered on STDIN when prompted for the PIN,
-  /// which will be re-used until the process exits or a cryptographic error occurs.
-  SMARTCARD { device_name: Option<String>, pin: Option<String>, },
-}
-
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
 #[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
@@ -136,3 +109,33 @@ where T: serde::Serialize + serde::de::DeserializeOwned
   }
 }
 
+impl IdentityConfig {
+  pub async fn read_private_key_ed25519_pem_file(&self) -> DynResult<ed25519_dalek::SigningKey> {
+    let contents = tokio::fs::read_to_string(&self.key).await?;
+    let pem = pem::parse(&contents)?;
+
+    if crate::v_is_everything() {
+      tracing::warn!("pem = {:?}", pem);
+    }
+
+    let pem_tag = pem.tag();
+    let encoded_pem_contents = pem.contents();
+
+    let pki = pkcs8::PrivateKeyInfo::try_from(encoded_pem_contents).map_err(|non_std_err| format!("{:?}", non_std_err) )?;
+
+    if pki.private_key.len() != ed25519_dalek::SECRET_KEY_LENGTH {
+      return Err(format!(
+        "Error: Expected pki.private_key.len() ({}) to be exactly ed25519_dalek::SECRET_KEY_LENGTH ({}) bytes long. Refusing to parse unknown key material",
+        pki.private_key.len(),
+        ed25519_dalek::SECRET_KEY_LENGTH).into()
+      )
+    }
+
+    let mut signing_key_bytes: [u8; ed25519_dalek::SECRET_KEY_LENGTH] = [0u8; ed25519_dalek::SECRET_KEY_LENGTH];
+    for i in 0..ed25519_dalek::SECRET_KEY_LENGTH {
+      signing_key_bytes[i] = pki.private_key[i]; // Safety: Already did length check upstairs
+    }
+
+    Ok( ed25519_dalek::SigningKey::from_bytes(&signing_key_bytes) )
+  }
+}
