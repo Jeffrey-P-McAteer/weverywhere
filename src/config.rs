@@ -112,30 +112,40 @@ where T: serde::Serialize + serde::de::DeserializeOwned
 impl IdentityConfig {
   pub async fn read_private_key_ed25519_pem_file(&self) -> DynResult<ed25519_dalek::SigningKey> {
     let contents = tokio::fs::read_to_string(&self.key).await?;
-    let pem = pem::parse(&contents)?;
+    use der::Decode;
 
-    if crate::v_is_everything() {
-      tracing::warn!("pem = {:?}", pem);
+    // First, decode the PEM format to get the raw DER bytes
+    let pem = pem::parse(contents)?;
+
+    // Verify this is a private key
+    if pem.tag() != "PRIVATE KEY" {
+        return Err(format!("Expected PRIVATE KEY label, got: {}", pem.tag()).into());
     }
 
-    let pem_tag = pem.tag();
-    let encoded_pem_contents = pem.contents();
+    let der_bytes = pem.contents();
 
-    let pki = pkcs8::PrivateKeyInfo::try_from(encoded_pem_contents).map_err(|non_std_err| format!("{:?}", non_std_err) )?;
+    // Parse the DER bytes as a PKCS#8 PrivateKeyInfo structure
+    let private_key_info = pkcs8::PrivateKeyInfo::from_der(der_bytes).map_err(|non_std_err| format!("{:?}", non_std_err) )?;
 
-    if pki.private_key.len() != ed25519_dalek::SECRET_KEY_LENGTH {
-      return Err(format!(
-        "Error: Expected pki.private_key.len() ({}) to be exactly ed25519_dalek::SECRET_KEY_LENGTH ({}) bytes long. Refusing to parse unknown key material",
-        pki.private_key.len(),
-        ed25519_dalek::SECRET_KEY_LENGTH).into()
-      )
+    // Extract the raw private key bytes from the PKCS#8 structure
+    let private_key_bytes = private_key_info.private_key;
+
+    // The private key bytes for Ed25519 are wrapped in an OCTET STRING
+    // We need to parse this inner OCTET STRING to get the actual 32 bytes
+    let octet_string = der::asn1::OctetString::from_der(private_key_bytes).map_err(|non_std_err| format!("{:?}", non_std_err) )?;
+    let key_bytes = octet_string.as_bytes();
+
+    // Ensure we have exactly 32 bytes
+    if key_bytes.len() != 32 {
+        return Err(format!("Expected 32 bytes for Ed25519 key, got {}", key_bytes.len()).into());
     }
 
-    let mut signing_key_bytes: [u8; ed25519_dalek::SECRET_KEY_LENGTH] = [0u8; ed25519_dalek::SECRET_KEY_LENGTH];
-    for i in 0..ed25519_dalek::SECRET_KEY_LENGTH {
-      signing_key_bytes[i] = pki.private_key[i]; // Safety: Already did length check upstairs
-    }
+    // Convert to array and create SigningKey
+    let mut key_array = [0u8; 32];
+    key_array.copy_from_slice(key_bytes);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
 
-    Ok( ed25519_dalek::SigningKey::from_bytes(&signing_key_bytes) )
+    Ok(signing_key)
+
   }
 }

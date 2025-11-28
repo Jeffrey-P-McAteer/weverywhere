@@ -25,7 +25,8 @@ glob = "0.3"
 ed25519-dalek = "2"
 cryptoki = "0.10"
 pem = "3"
-pkcs8 = "0.10"
+der = { version = "0.7", features = ["alloc"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
 
 [dependencies.serde]
 version = "1.0"
