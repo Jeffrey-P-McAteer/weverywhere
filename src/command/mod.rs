@@ -47,12 +47,12 @@ pub async fn configuration(args: &args::Args, style: ConfigStyle) -> DynResult<(
       tracing::info!("{:#?}", config_struct);
 
       if style == ConfigStyle::CreateMissingKeys {
-        if !tokio::fs::metadata(&config_struct.identity.key).await.is_ok() {
-          tracing::warn!("The file {:?} does not exist and a new identity will be generated.", &config_struct.identity.key);
-          crypto_utils::generate_private_key_ed25519_pem_file(&config_struct.identity.key).await?;
+        if !tokio::fs::metadata(&config_struct.identity.keyfile).await.is_ok() {
+          tracing::warn!("The file {:?} does not exist and a new identity will be generated.", &config_struct.identity.keyfile);
+          crypto_utils::generate_private_key_ed25519_pem_file(&config_struct.identity.keyfile).await?;
         }
         else {
-          tracing::warn!("The file {:?} already exists, refusing to overwrite with new key material!", &config_struct.identity.key);
+          tracing::warn!("The file {:?} already exists, refusing to overwrite with new key material!", &config_struct.identity.keyfile);
         }
       }
 

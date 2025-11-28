@@ -8,6 +8,11 @@ use optionable::OptionableConvert;
 #[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
 pub struct Config {
   pub identity: IdentityConfig,
+
+  #[serde(default)]
+  pub trusted: Vec<SingleTrustedKey>,
+
+  #[serde(default)]
   pub includes: Vec<SingleInclude>,
 }
 
@@ -17,6 +22,12 @@ pub struct SingleInclude {
   pub path: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
+#[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
+pub struct SingleTrustedKey {
+  pub key: String,
+}
+
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
 #[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
@@ -24,7 +35,7 @@ pub struct IdentityConfig {
   /// Human Name
   pub name: String,
   /// Private key file; TODO we will if/else on FIDO2/SmartCard/TPM data l8ter
-  pub key: std::path::PathBuf,
+  pub keyfile: std::path::PathBuf,
 }
 
 
@@ -81,7 +92,8 @@ async fn process_config_override_file(config: &Config, override_file_path: &std:
 
   let joined_o: ConfigOpt = ConfigOpt {
     identity: fancy_omerge(config_o.identity, override_data.identity)?,
-    includes: fancy_omerge(config_o.includes, override_data.includes)?,
+    trusted: fancy_omerge_vec(config_o.trusted, override_data.trusted)?,
+    includes: fancy_omerge_vec(config_o.includes, override_data.includes)?,
 
     // TODO other top-level fields here
   };
@@ -109,9 +121,31 @@ where T: serde::Serialize + serde::de::DeserializeOwned
   }
 }
 
+fn fancy_omerge_vec<T>(f1: Option<Vec<T>>, f2: Option<Vec<T>>) -> DynResult<Option<Vec<T>>>
+where T: serde::Serialize + serde::de::DeserializeOwned
+{
+  match (f1, f2) {
+    (Some(v1), None) => {
+      Ok(Some(v1))
+    }
+    (Some(mut v1), Some(mut v2)) => {
+      let mut combined_vec: Vec<T> = Vec::with_capacity(v1.len() + v2.len());
+      combined_vec.append(&mut v1);
+      combined_vec.append(&mut v2);
+      Ok( Some(combined_vec) )
+    }
+    (None, Some(v2)) => {
+      Ok(Some(v2))
+    }
+    (None, None) => {
+      Ok(None)
+    }
+  }
+}
+
 impl IdentityConfig {
   pub async fn read_private_key_ed25519_pem_file(&self) -> DynResult<ed25519_dalek::SigningKey> {
-    let contents = tokio::fs::read_to_string(&self.key).await?;
+    let contents = tokio::fs::read_to_string(&self.keyfile).await?;
     use der::Decode;
 
     // First, decode the PEM format to get the raw DER bytes
