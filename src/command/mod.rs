@@ -60,6 +60,13 @@ pub async fn configuration(args: &args::Args, style: ConfigStyle) -> DynResult<(
       tracing::info!("[ Identity Public Key ]");
       tracing::info!("{}", crypto_utils::format_public_key(&identity_key));
 
+      for trusted in config_struct.trusted.iter() {
+        match crypto_utils::public_key_to_ed25519_vk(&trusted.key) {
+          Ok(vk) => tracing::info!("{:?}", vk),
+          Err(e) => tracing::info!("{:?}", e),
+        }
+      }
+
     }
     Err(e) => {
       tracing::warn!("Failed to parse the config file {:?}", args.config);

@@ -35,6 +35,22 @@ pub fn format_public_key(key: &ed25519_dalek::SigningKey) -> String {
     format!("ssh-ed25519 {} {}", encoded, "" /* comment field */).trim().to_string()
 }
 
+pub fn public_key_to_ed25519_vk(public_key: &str) -> DynResult<ed25519_dalek::VerifyingKey> {
+    use ed25519_dalek::VerifyingKey;
+    use ssh_key::PublicKey;
+
+    // Parse the SSH public key
+    let public_key = PublicKey::from_openssh(public_key)?;
+
+    // Extract the Ed25519 key data
+    if let ssh_key::public::KeyData::Ed25519(ed25519_key) = public_key.key_data() {
+        let verifying_key = VerifyingKey::from_bytes(ed25519_key.as_ref())?;
+        Ok(verifying_key)
+    }
+    else {
+        Err("Not an Ed25519 key".into())
+    }
+}
 
 #[cfg(test)]
 mod tests {
