@@ -32,6 +32,11 @@ pub enum Command {
         file_path: std::path::PathBuf,
     },
 
+    /// Prints information about your current configuration;
+    Configuration {
+
+    },
+
     InstallTo {
         /// Path to root of system to install into.
         /// This generally must run as root and will write to files under etc/ and bin/

@@ -1,4 +1,5 @@
 
+use crate::*;
 
 #[allow(non_camel_case_types)]
 #[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -30,7 +31,7 @@ pub enum PKI_Type {
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
-  pub pki_type: PKI_Type,
+  pub identity: IdentityConfig,
   pub includes: Vec<SingleInclude>,
 }
 
@@ -40,4 +41,26 @@ pub struct SingleInclude {
 }
 
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IdentityConfig {
+  #[serde(rename = "name")]
+  pub human_name: String,
+  #[serde(rename = "key")]
+  pub private_key_file: std::path::PathBuf,
+}
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IdentityInline {
+  pub human_name: String,
+  pub encoded_public_key: Vec<u8>,
+}
+
+
+
+impl Config {
+  pub async fn read_from_file(file: &std::path::Path) -> DynResult<Config> {
+    let contents = tokio::fs::read_to_string(file).await?;
+    let parsed_struct = toml::from_str(&contents)?;
+    Ok( parsed_struct )
+  }
+}

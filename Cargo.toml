@@ -19,6 +19,7 @@ getifs = "0.4"
 # Crypto implementations; we abstract over multiple backends for signatures, encryption, and validation.
 ed25519-dalek = "2"
 cryptoki = "0.10"
+pem = "3"
 
 
 [dependencies.serde]

@@ -8,6 +8,9 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
     Command::Info { file_path } => {
       info(file_path).await?;
     }
+    Command::Configuration { } => {
+      configuration(args).await?;
+    }
     Command::InstallTo { install_root, install_etc, install_bin } => {
       install_to(install_root, install_etc, install_bin).await?;
     }
@@ -25,6 +28,26 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
 pub async fn info(file_path: &std::path::PathBuf) -> DynResult<()> {
   tracing::warn!("This has not been implemented yet, see {}:{}", file!(), line!());
 
+  Ok(())
+}
+
+pub async fn configuration(args: &args::Args) -> DynResult<()> {
+  match config::Config::read_from_file(&args.config).await {
+    Ok(config_struct) => {
+      println!("Configuration from {:?}", args.config);
+      println!("{:#?}", config_struct);
+
+    }
+    Err(e) => {
+      tracing::warn!("Failed to parse the config file {:?}", args.config);
+      if let Some(parse_error) = e.downcast_ref::<toml::de::Error>() {
+        tracing::warn!("> {}", parse_error.message());
+      }
+      else {
+        tracing::warn!("{:?}", e);
+      }
+    }
+  }
   Ok(())
 }
 
