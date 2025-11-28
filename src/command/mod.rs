@@ -6,6 +6,7 @@ pub mod info;
 pub mod configuration;
 pub mod install_to;
 pub mod run;
+pub mod run_local;
 pub mod serve;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -31,6 +32,9 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
     }
     Command::Run { file_path, multicast_groups, port } => {
       run::run(file_path, multicast_groups.clone(), *port).await?;
+    }
+    Command::RunLocal { file_path } => {
+      run_local::run_local(file_path).await?;
     }
     Command::Serve { multicast_groups, port } => {
       serve::serve(multicast_groups.clone(), *port).await?;

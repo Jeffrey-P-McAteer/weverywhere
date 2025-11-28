@@ -69,6 +69,13 @@ pub enum Command {
         port: u16,
     },
 
+    /// Run the given WASI file locally, spinning up an executor as-if we had just become a server and recieved the program.
+    // Primarially for debugging, local testing, etc. Reads the same --config file as "serve" does.
+    RunLocal {
+        /// Path to the WASI file
+        file_path: std::path::PathBuf,
+    },
+
     /// Listen on the given socket for network messages and execute WASI programs sent to us
     Serve {
         /// UDP Multicast addresses to listen on
