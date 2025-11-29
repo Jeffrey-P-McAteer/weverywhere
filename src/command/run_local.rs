@@ -97,7 +97,7 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
 
   println!("\n--- Execution Complete ---");
   println!("Result: {:?}", result);
-  println!("Fuel consumed (≈instructions): {}", consumed_fuel);
+  println!("Fuel (instructions) consumed: {}", consumed_fuel);
   println!("Remaining fuel: {}", remaining_fuel);
 
 
