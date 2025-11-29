@@ -24,3 +24,11 @@ int do_report(char* out, unsigned int out_len) {
 
   return 0;
 }
+
+__attribute__((export_name("_start")))
+int _start(char* out, unsigned int out_len) {
+
+  do_report(out, out_len);
+
+  return 0;
+}
