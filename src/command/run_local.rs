@@ -1,7 +1,6 @@
 
 use super::*;
 
-
 pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let wasm_bytes = tokio::fs::read(file_path).await?;
 
@@ -17,10 +16,24 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let mut store = Store::new(&engine, StoreData::new(50));
 
   // Set initial fuel (roughly corresponds to instruction count)
-  store.set_fuel(10000)?;
+  store.set_fuel(128_000)?;
 
   // Create a linker to bind our custom module
   let mut linker = Linker::new(&engine);
+
+  // // Build a MINIMAL WASI context:
+  // //   - no filesystem
+  // //   - no random
+  // //   - no clocks
+  // //   - only stdout & stderr
+  // let wasi_ctx = WasiCtxBuilder::new()
+  //     .inherit_stdout()   // allow fd_write to stdout
+  //     .inherit_stderr()   // allow fd_write to stderr
+  //     // NOTE: do NOT call inherit_stdin()
+  //     // NOTE: do NOT call preopen_dir()
+  //     // NOTE: do NOT call inherit_args() unless you want argv
+  //     // NOTE: do NOT call inherit_env() unless you want env vars
+  //     .build();
 
   // Bind a custom "env" module with a "log" function
   linker.func_wrap(
@@ -52,10 +65,13 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
     tracing::info!("Export {} = {:?}", i, export);
   }
 
+  debug_all_imports(&mut linker, &mut store, &module)?;
+
   let instance = linker.instantiate(&mut store, &module)?;
 
   // Get the exported function we want to call
-  let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start")?;
+  //let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start")?;
+  let main_func = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
 
   println!("--- Executing WASM function ---");
   let initial_fuel = store.get_fuel()?;
@@ -68,7 +84,7 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let consumed_fuel = initial_fuel - remaining_fuel;
 
   println!("\n--- Execution Complete ---");
-  println!("Result: {}", result);
+  println!("Result: {:?}", result);
   println!("Fuel consumed (≈instructions): {}", consumed_fuel);
   println!("Remaining fuel: {}", remaining_fuel);
 
@@ -76,6 +92,59 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   Ok(())
 }
 
+fn debug_all_imports<T>(
+    linker: &mut Linker<T>,
+    store: &mut Store<T>,
+    module: &Module,
+) -> DynResult<()> {
+
+    for import in module.imports() {
+        let ExternType::Func(func_ty) = import.ty() else {
+            continue;
+        };
+
+        let module_name = import.module().to_string();
+        let func_name = import.name().to_string();
+
+        let mod_name = module_name.clone();
+        let fn_name = func_name.clone();
+        let result_types: Vec<_> = func_ty.results().collect();
+
+        // 🔥 IMPORTANT: func is created FROM THE STORE, not the engine
+        let host_func = Func::new(
+            store.as_context_mut(),
+            func_ty.clone(),
+            move |_caller: Caller<'_, T>, args: &[Val], results: &mut [Val]| {
+                println!("called import {}::{}", mod_name, fn_name);
+                println!("  args: {:?}", args);
+
+                for (i, ty) in result_types.iter().enumerate() {
+                    results[i] = match ty {
+                        ValType::I32 => Val::I32(1),
+                        ValType::I64 => Val::I64(1),
+                        ValType::F32 => Val::F32(0f32.to_bits()),
+                        ValType::F64 => Val::F64(0f64.to_bits()),
+                        ValType::V128 => Val::V128(1.into()),
+                        //ValType::ExternRef => Val::ExternRef(None),
+                        _ => unimplemented!("result {:?}", ty),
+                    };
+                }
+
+                Ok(())
+            },
+        );
+
+        // 🔥 define also requires the store first
+        linker.define(
+            store.as_context_mut(),
+            &module_name,
+            &func_name,
+            host_func,
+        )?;
+    }
+
+    Ok(())
+}
 
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,6 +152,7 @@ use std::sync::Arc;
 use wasmtime::*;
 
 /// Store data that tracks instruction count
+#[derive(Debug)]
 struct StoreData {
     instruction_count: Arc<AtomicU64>,
     max_instructions: u64,
