@@ -26,9 +26,11 @@ int do_report(char* out, unsigned int out_len) {
 }
 
 __attribute__((export_name("_start")))
-int _start(char* out, unsigned int out_len) {
+void _start() {
+
+  char* out;
+  unsigned int out_len = 0;
 
   do_report(out, out_len);
 
-  return 0;
 }
