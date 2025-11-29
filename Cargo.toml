@@ -42,6 +42,10 @@ features = ["derive"]
 version = "4"
 features = ["derive"]
 
+[dependencies.dashmap]
+version = "6"
+features = ["rayon", ] # todo possibly "inline"? Profile first.
+
 [dependencies.wasmtime]
 version = "38"
 

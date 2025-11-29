@@ -9,6 +9,7 @@ mod args;
 mod config;
 mod comm;
 mod command;
+mod executor;
 mod universal_serde;
 mod net_utils;
 mod messages;

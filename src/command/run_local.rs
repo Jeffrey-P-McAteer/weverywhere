@@ -1,6 +1,8 @@
 
 use super::*;
 
+use wasmtime::*;
+
 pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let wasm_bytes = tokio::fs::read(file_path).await?;
 
@@ -103,64 +105,6 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
 
   Ok(())
 }
-
-// // AI-generated experiment we are replacing with a proper WASI runtime that is locked-down or has overridden functions.
-// fn debug_all_imports<T>(
-//     linker: &mut Linker<T>,
-//     store: &mut Store<T>,
-//     module: &Module,
-// ) -> DynResult<()> {
-
-//     for import in module.imports() {
-//         let ExternType::Func(func_ty) = import.ty() else {
-//             continue;
-//         };
-
-//         let module_name = import.module().to_string();
-//         let func_name = import.name().to_string();
-
-//         let mod_name = module_name.clone();
-//         let fn_name = func_name.clone();
-//         let result_types: Vec<_> = func_ty.results().collect();
-
-//         // 🔥 IMPORTANT: func is created FROM THE STORE, not the engine
-//         let host_func = Func::new(
-//             store.as_context_mut(),
-//             func_ty.clone(),
-//             move |_caller: Caller<'_, T>, args: &[Val], results: &mut [Val]| {
-//                 println!("called import {}::{}", mod_name, fn_name);
-//                 println!("  args: {:?}", args);
-
-//                 for (i, ty) in result_types.iter().enumerate() {
-//                     results[i] = match ty {
-//                         ValType::I32 => Val::I32(0),
-//                         ValType::I64 => Val::I64(0),
-//                         ValType::F32 => Val::F32(0f32.to_bits()),
-//                         ValType::F64 => Val::F64(0f64.to_bits()),
-//                         ValType::V128 => Val::V128(0.into()),
-//                         ValType::Ref(_ref) => Val::AnyRef(None),
-//                         //_ => unimplemented!("result {:?}", ty),
-//                     };
-//                 }
-
-//                 Ok(())
-//             },
-//         );
-
-//         // 🔥 define also requires the store first
-//         linker.define(
-//             store.as_context_mut(),
-//             &module_name,
-//             &func_name,
-//             host_func,
-//         )?;
-//     }
-
-//     Ok(())
-// }
-
-
-use wasmtime::*;
 
 /// Store data that tracks instruction count
 struct StoreData {
