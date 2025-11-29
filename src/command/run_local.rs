@@ -4,16 +4,34 @@ use super::*;
 pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let wasm_bytes = tokio::fs::read(file_path).await?;
 
-  tracing::info!("Running {:?} ({}mb)", file_path, wasm_bytes.len() / 1_000_000);
+  if crate::v_is_info() {
+      tracing::info!("Running {:?} ({}mb)", file_path, wasm_bytes.len() / 1_000_000);
+  }
 
   // Configure the Wasmtime engine with fuel consumption enabled
   let mut config = Config::new();
   config.consume_fuel(true); // Enable fuel tracking for instruction counting
+  config.async_support(true); // Affects APIs available
 
   let engine = Engine::new(&config)?;
 
+  // // Build a MINIMAL WASI context:
+  // //   - no filesystem
+  // //   - no random
+  // //   - no clocks
+  // //   - only stdout & stderr
+  let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
+      .inherit_stdout()   // allow fd_write to stdout
+      .inherit_stderr()   // allow fd_write to stderr
+      // NOTE: do NOT call inherit_stdin()
+      // NOTE: do NOT call preopen_dir()
+      // NOTE: do NOT call inherit_args() unless you want argv
+      // NOTE: do NOT call inherit_env() unless you want env vars
+      //.build();
+      .build_p1();
+
   // Create a store with our custom data
-  let mut store = Store::new(&engine, StoreData::new(50));
+  let mut store = Store::new(&engine, StoreData::new(50, wasi_ctx));
 
   // Set initial fuel (roughly corresponds to instruction count)
   store.set_fuel(128_000)?;
@@ -21,19 +39,9 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   // Create a linker to bind our custom module
   let mut linker = Linker::new(&engine);
 
-  // // Build a MINIMAL WASI context:
-  // //   - no filesystem
-  // //   - no random
-  // //   - no clocks
-  // //   - only stdout & stderr
-  // let wasi_ctx = WasiCtxBuilder::new()
-  //     .inherit_stdout()   // allow fd_write to stdout
-  //     .inherit_stderr()   // allow fd_write to stderr
-  //     // NOTE: do NOT call inherit_stdin()
-  //     // NOTE: do NOT call preopen_dir()
-  //     // NOTE: do NOT call inherit_args() unless you want argv
-  //     // NOTE: do NOT call inherit_env() unless you want env vars
-  //     .build();
+  wasmtime_wasi::p1::add_to_linker_async::<StoreData>(&mut linker, |linker_store_data| {
+      &mut linker_store_data.wasi_p1_ctx
+  })?;
 
   // Bind a custom "env" module with a "log" function
   linker.func_wrap(
@@ -57,17 +65,21 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
 
   let module = Module::new(&engine, &wasm_bytes)?;
 
-  for (i, import) in module.imports().enumerate() {
-    tracing::info!("Import {} = {:?}", i, import);
+  if crate::v_is_debug() {
+      tracing::info!("");
+      for (i, import) in module.imports().enumerate() {
+        tracing::info!("Import {} = {:?}", i, import);
+      }
+      tracing::info!("");
+      for (i, export) in module.exports().enumerate() {
+        tracing::info!("Export {} = {:?}", i, export);
+      }
+      tracing::info!("");
   }
 
-  for (i, export) in module.exports().enumerate() {
-    tracing::info!("Export {} = {:?}", i, export);
-  }
+  //debug_all_imports(&mut linker, &mut store, &module)?;
 
-  debug_all_imports(&mut linker, &mut store, &module)?;
-
-  let instance = linker.instantiate(&mut store, &module)?;
+  let instance = linker.instantiate_async(&mut store, &module).await?;
 
   // Get the exported function we want to call
   //let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start")?;
@@ -78,7 +90,7 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   println!("Initial fuel: {}", initial_fuel);
 
   // Execute the function and track fuel consumption
-  let result = main_func.call(&mut store, ())?;
+  let result = main_func.call_async(&mut store, ()).await?;
 
   let remaining_fuel = store.get_fuel()?;
   let consumed_fuel = initial_fuel - remaining_fuel;
@@ -92,6 +104,7 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   Ok(())
 }
 
+// AI-generated experiment we are replacing with a proper WASI runtime that is locked-down or has overridden functions.
 fn debug_all_imports<T>(
     linker: &mut Linker<T>,
     store: &mut Store<T>,
@@ -120,13 +133,13 @@ fn debug_all_imports<T>(
 
                 for (i, ty) in result_types.iter().enumerate() {
                     results[i] = match ty {
-                        ValType::I32 => Val::I32(1),
-                        ValType::I64 => Val::I64(1),
+                        ValType::I32 => Val::I32(0),
+                        ValType::I64 => Val::I64(0),
                         ValType::F32 => Val::F32(0f32.to_bits()),
                         ValType::F64 => Val::F64(0f64.to_bits()),
-                        ValType::V128 => Val::V128(1.into()),
-                        //ValType::ExternRef => Val::ExternRef(None),
-                        _ => unimplemented!("result {:?}", ty),
+                        ValType::V128 => Val::V128(0.into()),
+                        ValType::Ref(_ref) => Val::AnyRef(None),
+                        //_ => unimplemented!("result {:?}", ty),
                     };
                 }
 
@@ -148,21 +161,24 @@ fn debug_all_imports<T>(
 
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use wasmtime::*;
 
 /// Store data that tracks instruction count
-#[derive(Debug)]
 struct StoreData {
     instruction_count: Arc<AtomicU64>,
     max_instructions: u64,
+    wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx,
 }
 
+unsafe impl Send for StoreData {}
+
 impl StoreData {
-    fn new(max_instructions: u64) -> Self {
+    fn new(max_instructions: u64, wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx) -> Self {
         Self {
             instruction_count: Arc::new(AtomicU64::new(0)),
-            max_instructions,
+            max_instructions: max_instructions,
+            wasi_p1_ctx: wasi_p1_ctx,
         }
     }
 
