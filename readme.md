@@ -64,6 +64,27 @@ This is a single rust binary.
     - [ ] download buttons
     - [ ] documentation rendering would be great
 
+# Vocabulary
+
+`weverywhere` uses a lot of existing design ideas, but we narrow them to more specific terms
+and try to re-use these terms in commands, configuration files, and documentation to avoid confusion.
+
+ - Program
+    - WASM or WASI binary which has a single indented entry point (`_start`)
+ - Library
+    - WASM binary which has many smaller entry points designed to be used by Programs
+ - Executor / Server
+    - Refers to a single machine running `weverywhere serve` as a long-running daemon which executes Programs passing through the Fabric.
+ - Controller / Client
+    - Refers to a single machine or originating service which issues a Program to be executed by the `weverywhere` Fabric.
+ - Fabric
+    - Refers to the set of connected Executors and Controllers. Typically this is synonymous with an IP network, but Executors may forward Programs and Messages as they see fit which breaks this analogy.
+ - Message
+    - Refers to serialized `weverywhere` structures
+
+TODO document trust things once we see what topologies will be necessary
+
+
 
 # Misc One-Liners for testing
 
