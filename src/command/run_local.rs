@@ -55,15 +55,14 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let instance = linker.instantiate(&mut store, &module)?;
 
   // Get the exported function we want to call
-  let run_func = instance
-      .get_typed_func::<(), i32>(&mut store, "run")?;
+  let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start")?;
 
   println!("--- Executing WASM function ---");
   let initial_fuel = store.get_fuel()?;
   println!("Initial fuel: {}", initial_fuel);
 
   // Execute the function and track fuel consumption
-  let result = run_func.call(&mut store, ())?;
+  let result = main_func.call(&mut store, ())?;
 
   let remaining_fuel = store.get_fuel()?;
   let consumed_fuel = initial_fuel - remaining_fuel;
