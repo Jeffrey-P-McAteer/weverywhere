@@ -49,9 +49,26 @@ pub struct IdentityConfig {
 
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct IdentityInline {
+pub struct IdentityData {
+  /// This is an untrusted value but is signed all the same; it may be ANY utf-8 set of characters up to 256 bytes long.
   pub human_name: String,
+
+  /// seconds since 00:00 January 1, 1970 in UTC-0 time when this was generated and signed.
+  /// If any system recieves an epoch_s claiming to be from the future it must be ignored or treated with the lowest possible trust.
+  pub generated_at_utc0_epoch_s: u64,
+
+  /// This allows for up to 16 hours of validity; we really want identity data to be re-signed regularly, and so
+  /// are not using a larger integer to store the data.
+  pub validity_s: u16,
+
+  /// Up to 16 utf-8 bytes of description hint for how to interpret encoded_public_key
+  pub encoded_public_key_fmt: String,
+  /// The bytes used to create a verification key for all signatures from this identity. May be a utf-8 string or any other encoding format supported by weverywhere.
   pub encoded_public_key: Vec<u8>,
+
+  /// Holds signature bytes in whatever format is hinted at by encoded_public_key_fmt
+  /// The following fields are hashed in order: human_name, generated_at_utc0_epoch_s, validity_s, encoded_public_key_fmt, encoded_public_key
+  pub signature: Vec<u8>,
 }
 
 

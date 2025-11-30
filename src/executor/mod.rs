@@ -21,7 +21,20 @@ pub struct Executor {
 
 }
 
-pub struct Program {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProgramData {
+  /// Used to determine the Controller / Client of this program, and the trust given to it by Executors / Servers.
+  source: config::IdentityData,
+
+  /// This is an untrusted value but is signed all the same; it may be ANY utf-8 set of characters up to 256 bytes long.
+  human_name: String,
+
+  /// The executable material.
+  wasm_program_bytes: Vec<u8>,
+
+  /// Holds signature bytes in whatever format is hinted at by source.encoded_public_key_fmt
+  /// The following fields are hashed in order: all fields of source, human_name, wasm_program_bytes
+  pub signature: Vec<u8>,
 
 }
 
@@ -49,10 +62,12 @@ impl Executor {
 
     }
   }
-  pub fn exec(&self, program: &Program) -> DynResult<()> {
+
+  pub fn exec(&self, program: &ProgramData) -> DynResult<()> {
     std::unimplemented!()
     //Ok(())
   }
+
 }
 
 
