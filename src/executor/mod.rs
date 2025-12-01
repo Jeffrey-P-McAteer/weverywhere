@@ -39,7 +39,19 @@ pub struct ProgramData {
 }
 
 pub struct RunningProgram {
+  pub data: ProgramData,
 
+  pub engine: wasmtime::Engine,
+  pub store: wasmtime::Store<RPStoreData>,
+
+}
+
+/// This structure participates in wasmtime function callbacks et al
+pub struct RPStoreData {
+  pub rp: Box<RunningProgram>, // MUST point to the RunningProgram struct which holds the related Store<RPStoreData>
+  pub instruction_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
+  pub max_instructions: u64,
+  pub wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx,
 }
 
 impl Executor {
