@@ -38,6 +38,61 @@ pub struct ProgramData {
 
 }
 
+impl ProgramData {
+
+}
+
+pub struct ProgramDataBuilder {
+  source: Option<config::IdentityData>,
+  human_name: String,
+  wasm_program_bytes: Vec<u8>,
+  signature: Vec<u8>,
+}
+
+impl ProgramDataBuilder {
+  pub fn new() -> ProgramDataBuilder {
+    ProgramDataBuilder {
+      source: None,
+      human_name: "UNSET_NAME".to_string(),
+      wasm_program_bytes: Vec::with_capacity(4096),
+      signature: Vec::with_capacity(1024),
+    }
+  }
+  pub fn set_source(mut self, source: &config::IdentityData) -> Self {
+    self.source = Some(source.clone());
+    self
+  }
+  pub fn set_human_name<T: AsRef<str>>(mut self, name: T) -> Self {
+    self.human_name = name.as_ref().to_string();
+    self
+  }
+  pub fn set_wasm_program_bytes<T: AsRef<[u8]>>(mut self, wasm_program_bytes: T) -> Self {
+    self.wasm_program_bytes.clear();
+    self.wasm_program_bytes.extend(wasm_program_bytes.as_ref());
+    self
+  }
+  pub fn set_signature<T: AsRef<[u8]>>(mut self, signature: T) -> Self {
+    self.signature.clear();
+    self.signature.extend(signature.as_ref());
+    self
+  }
+  pub fn build(self) -> DynResult<ProgramData> {
+    if let Some(source) = self.source {
+      Ok(ProgramData {
+        source: source,
+        human_name: self.human_name,
+        wasm_program_bytes: self.wasm_program_bytes,
+        signature: self.signature,
+      })
+    }
+    else {
+      Err("Error: source is None!".into())
+    }
+  }
+}
+
+
+
 pub struct RunningProgram {
   pub data: ProgramData,
 

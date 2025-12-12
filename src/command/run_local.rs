@@ -3,8 +3,40 @@ use super::*;
 
 use wasmtime::*;
 
-pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
-  let wasm_bytes = tokio::fs::read(file_path).await?;
+
+pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> DynResult<()> {
+
+  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+
+  let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+
+  if crate::v_is_info() {
+      tracing::info!("Running {:?} ({})", file_path, fs_utils::format_size_bytes(wasm_bytes.len()) );
+  }
+
+  let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+
+  let pd = executor::ProgramDataBuilder::new()
+    .set_wasm_program_bytes(&wasm_bytes)
+    .set_source(&source)
+    .build().map_err(map_loc_err!())?;
+
+  let executor = executor::Executor::new();
+
+  match executor.exec(&pd) {
+    Ok(res) => {
+      tracing::info!("res = {:?}", res);
+    }
+    Err(e) => {
+      tracing::info!("e = {:?}", e);
+    }
+  }
+
+  Ok(())
+}
+
+pub async fn old_run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
+  let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
 
   if crate::v_is_info() {
       tracing::info!("Running {:?} ({}mb)", file_path, wasm_bytes.len() / 1_000_000);
@@ -15,7 +47,7 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   config.consume_fuel(true); // Enable fuel tracking for instruction counting
   config.async_support(true); // Affects APIs available
 
-  let engine = Engine::new(&config)?;
+  let engine = Engine::new(&config).map_err(map_loc_err!())?;
 
   // // Build a MINIMAL WASI context:
   // //   - no filesystem
@@ -36,14 +68,14 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   let mut store = Store::new(&engine, StoreData::new(50, wasi_ctx));
 
   // Set initial fuel (roughly corresponds to instruction count)
-  store.set_fuel(128_000)?;
+  store.set_fuel(128_000).map_err(map_loc_err!())?;
 
   // Create a linker to bind our custom module
   let mut linker = Linker::new(&engine);
 
   wasmtime_wasi::p1::add_to_linker_async::<StoreData>(&mut linker, |linker_store_data| {
       &mut linker_store_data.wasi_p1_ctx
-  })?;
+  }).map_err(map_loc_err!())?;
 
   // Bind a custom "env" module with a "log" function
   linker.func_wrap(
@@ -53,7 +85,7 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
           tracing::info!("[WASM] Log called with ptr={}, len={}", ptr, len);
           Ok(())
       },
-  )?;
+  ).map_err(map_loc_err!())?;
 
   // Add another custom function that returns a value
   linker.func_wrap(
@@ -63,9 +95,9 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
           tracing::info!("[HOST] get_magic_number called, returning 42");
           Ok(42)
       },
-  )?;
+  ).map_err(map_loc_err!())?;
 
-  let module = Module::new(&engine, &wasm_bytes)?;
+  let module = Module::new(&engine, &wasm_bytes).map_err(map_loc_err!())?;
 
   if crate::v_is_debug() {
       tracing::info!("");
@@ -79,22 +111,22 @@ pub async fn run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
       tracing::info!("");
   }
 
-  //debug_all_imports(&mut linker, &mut store, &module)?;
+  //debug_all_imports(&mut linker, &mut store, &module).map_err(map_loc_err!())?;
 
-  let instance = linker.instantiate_async(&mut store, &module).await?;
+  let instance = linker.instantiate_async(&mut store, &module).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
 
   // Get the exported function we want to call
-  //let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start")?;
-  let main_func = instance.get_typed_func::<(), ()>(&mut store, "_start")?;
+  //let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start").map_err(map_loc_err!())?;
+  let main_func = instance.get_typed_func::<(), ()>(&mut store, "_start").map_err(map_loc_err!())?;
 
   println!("--- Executing WASM function ---");
-  let initial_fuel = store.get_fuel()?;
+  let initial_fuel = store.get_fuel().map_err(map_loc_err!())?;
   println!("Initial fuel: {}", initial_fuel);
 
   // Execute the function and track fuel consumption
-  let result = main_func.call_async(&mut store, ()).await?;
+  let result = main_func.call_async(&mut store, ()).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
 
-  let remaining_fuel = store.get_fuel()?;
+  let remaining_fuel = store.get_fuel().map_err(map_loc_err!())?;
   let consumed_fuel = initial_fuel - remaining_fuel;
 
   println!("\n--- Execution Complete ---");

@@ -2,8 +2,7 @@
 // TODO remove after development
 #![allow(unused_variables, unused_imports, dead_code)]
 
-
-type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
+type DynResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 mod args;
 mod config;
@@ -14,6 +13,9 @@ mod universal_serde;
 mod net_utils;
 mod messages;
 mod crypto_utils;
+mod fs_utils;
+mod sys_utils;
+mod err_utils;
 
 fn main() {
     use clap::Parser;
@@ -34,7 +36,7 @@ fn main() {
     match rt.block_on(async_main(&mut args)) {
         Ok(_) => { }
         Err(e) => {
-            eprintln!("{:?}", e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     }
@@ -43,7 +45,7 @@ fn main() {
 
 async fn async_main(args: &mut args::Args) -> DynResult<()> {
 
-    command::run_command(&args.command, &args).await?;
+    command::run_command(&args.command, &args).await.map_err(map_loc_err!())?;
 
     Ok(())
 }

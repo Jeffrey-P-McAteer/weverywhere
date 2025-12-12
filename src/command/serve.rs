@@ -48,15 +48,15 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
     (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), port )
   };
 
-  //let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
-  let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
+  //let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await.map_err(map_loc_err!())?;
+  let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await.map_err(map_loc_err!())?;
 
   if multicast_addr.is_ipv4() {
-    sock.set_multicast_loop_v4(true)?;
-    sock.set_multicast_ttl_v4(4)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
+    sock.set_multicast_loop_v4(true).map_err(map_loc_err!())?;
+    sock.set_multicast_ttl_v4(4).map_err(map_loc_err!())?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
   }
   else {
-    sock.set_multicast_loop_v6(true)?;
+    sock.set_multicast_loop_v6(true).map_err(map_loc_err!())?;
   }
 
   match multicast_addr {
@@ -64,27 +64,27 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
       if iface_addrs.len() > 0 {
         for iface_addr in iface_addrs.iter() {
           if let std::net::IpAddr::V4(iface_addr_v4) = iface_addr {
-            sock.join_multicast_v4(*multicast_addr, *iface_addr_v4)?;
+            sock.join_multicast_v4(*multicast_addr, *iface_addr_v4).map_err(map_loc_err!())?;
           }
         }
       }
       else {
-        sock.join_multicast_v4(*multicast_addr, core::net::Ipv4Addr::UNSPECIFIED)?;
+        sock.join_multicast_v4(*multicast_addr, core::net::Ipv4Addr::UNSPECIFIED).map_err(map_loc_err!())?;
       }
     }
     std::net::IpAddr::V6(multicast_addr) => {
-      sock.join_multicast_v6(multicast_addr, iface_idx)?;
+      sock.join_multicast_v6(multicast_addr, iface_idx).map_err(map_loc_err!())?;
     }
   }
 
   let mut buf = [0; 16*1024];
   loop {
-      let (len, addr) = sock.recv_from(&mut buf).await?;
+      let (len, addr) = sock.recv_from(&mut buf).await.map_err(map_loc_err!())?;
       tracing::warn!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
 
-      //sock.connect(addr).await?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
+      //sock.connect(addr).await.map_err(map_loc_err!())?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
 
-      let len = sock.send_to(&buf[..len], addr).await?;
+      let len = sock.send_to(&buf[..len], addr).await.map_err(map_loc_err!())?;
       tracing::warn!("{:?} bytes sent", len);
 
   }

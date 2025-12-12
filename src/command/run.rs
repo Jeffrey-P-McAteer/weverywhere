@@ -48,33 +48,33 @@ pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface
     (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), 0 )
   };
 
-  let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await?;
+  let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await.map_err(map_loc_err!())?;
 
   if multicast_group.is_ipv4() {
-    sock.set_multicast_loop_v4(true)?;
-    sock.set_multicast_ttl_v4(4)?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
+    sock.set_multicast_loop_v4(true).map_err(map_loc_err!())?;
+    sock.set_multicast_ttl_v4(4).map_err(map_loc_err!())?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
   }
   else {
-    sock.set_multicast_loop_v6(true)?;
+    sock.set_multicast_loop_v6(true).map_err(map_loc_err!())?;
   }
 
   match multicast_group {
     std::net::IpAddr::V4(multicast_group) => {
       for iface_addr in iface_addrs.iter() {
         if let std::net::IpAddr::V4(iface_addr_v4) = iface_addr {
-          sock.join_multicast_v4(*multicast_group, *iface_addr_v4)?;
+          sock.join_multicast_v4(*multicast_group, *iface_addr_v4).map_err(map_loc_err!())?;
         }
       }
     }
     std::net::IpAddr::V6(multicast_group) => {
-      sock.join_multicast_v6(multicast_group, iface_idx)?;
+      sock.join_multicast_v6(multicast_group, iface_idx).map_err(map_loc_err!())?;
     }
   }
 
-  // sock.connect( (*multicast_group, port) ).await?;
+  // sock.connect( (*multicast_group, port) ).await.map_err(map_loc_err!())?;
   let mut buf = [0; 1024];
 
-  let len = sock.send_to(b"test 111111 test 222222 test 333333", (*multicast_group, port)).await?;
+  let len = sock.send_to(b"test 111111 test 222222 test 333333", (*multicast_group, port)).await.map_err(map_loc_err!())?;
   tracing::warn!("{:?} bytes sent", len);
 
   let td = tokio::time::Duration::from_millis(100);
