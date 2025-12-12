@@ -79,7 +79,12 @@ impl IdentityData {
     let encoded_public_key = config.identity.read_public_key_ed25519_pem_file().await.map_err(map_loc_err!())?.as_bytes().to_vec();
     let generated_at_utc0_epoch_s = sys_utils::epoch_seconds_now_utc0();
 
-    let signature = std::unimplemented!();
+    let our_private_key = config.identity.read_private_key_ed25519_pem_file().await.map_err(map_loc_err!())?;
+
+    let signature = IdentityData::sign_identity_data(
+      &our_private_key,
+      &human_name, &generated_at_utc0_epoch_s, &validity_s, &encoded_public_key_fmt, &encoded_public_key
+    );
 
     Ok(IdentityData {
       human_name: human_name,
@@ -87,8 +92,29 @@ impl IdentityData {
       validity_s: validity_s,
       encoded_public_key_fmt: encoded_public_key_fmt,
       encoded_public_key: encoded_public_key,
-      signature: signature,
+      signature: signature.to_vec(),
     })
+  }
+
+  pub fn sign_identity_data(signing_key: &ed25519_dalek::SigningKey,
+                            human_name: &str, generated_at_utc0_epoch_s: &u64, validity_s: &u16,
+                            encoded_public_key_fmt: &str, encoded_public_key: &[u8])
+  -> ed25519_dalek::Signature {
+    use ed25519_dalek::{Signature, Signer};
+    use sha2::{Sha256, Digest};
+    // Hash the message with SHA-256
+    let mut hasher = sha2::Sha256::new();
+
+    hasher.update(human_name.as_bytes());
+    hasher.update(generated_at_utc0_epoch_s.to_le_bytes()); // Note: we use Little-Endian byte order for the signature. Arbitrary decision.
+    hasher.update(validity_s.to_le_bytes());
+    hasher.update(encoded_public_key_fmt.as_bytes());
+    hasher.update(encoded_public_key);
+
+    let hash = hasher.finalize();
+
+    // Sign the hash
+    signing_key.sign(&hash)
   }
 }
 
