@@ -17,11 +17,14 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
   let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!())?;
 
   let pd = executor::ProgramDataBuilder::new()
+    .set_human_name(
+      file_path.file_name().map(|fn_osstr| fn_osstr.to_string_lossy().to_string() ).unwrap_or_else(|| "UNSET_NAME".to_string() )
+    )
     .set_wasm_program_bytes(&wasm_bytes)
     .set_source(&source)
     .build().map_err(map_loc_err!())?;
 
-  let executor = executor::Executor::new();
+  let executor = executor::Executor::new(&local_config);
 
   match executor.exec(&pd) {
     Ok(res) => {

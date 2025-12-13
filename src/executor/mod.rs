@@ -7,6 +7,10 @@ use crate::args::*;
  **/
 pub struct Executor {
 
+  /// Stores host-set configuration such as which PKI identities are trusted
+  ///
+  config: config::Config,
+
   next_pid: std::sync::atomic::AtomicU64,
 
   untrusted_allowed_instructions: std::sync::atomic::AtomicU64,
@@ -110,8 +114,10 @@ pub struct RPStoreData {
 }
 
 impl Executor {
-  pub fn new() -> Executor {
+  pub fn new(config: &config::Config) -> Executor {
     Executor {
+      config: config.clone(),
+
       next_pid: std::sync::atomic::AtomicU64::new(0),
 
       untrusted_allowed_instructions: std::sync::atomic::AtomicU64::new(16 * 1024),
