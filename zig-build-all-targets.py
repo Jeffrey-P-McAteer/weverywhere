@@ -141,12 +141,11 @@ macos_sdk_path = get_most_recent_sdk(macos_sdk_folder)
 macos_framework_path = os.path.join(macos_sdk_path, "System", "Library", "Frameworks")
 macos_lib_path = os.path.join(macos_sdk_path, "usr", "lib")
 # Construct the linker flags for Zig
-# -syslibroot tells Zig where the SDK root is
+# -isysroot tells Zig where the SDK root is
 # -F adds framework search paths
 # -L adds library search paths
 zig_link_args = [
-    f"-C link-arg=-syslibroot",
-    f"-C link-arg={macos_sdk_path}",
+    f"-C link-arg=-isysroot", f"-C link-arg={macos_sdk_path}",
     f"-C link-arg=-F{macos_framework_path}",
     f"-C link-arg=-L{macos_lib_path}",
 ]
