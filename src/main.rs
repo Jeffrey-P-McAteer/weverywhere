@@ -45,9 +45,36 @@ fn main() {
 
 async fn async_main(args: &mut args::Args) -> DynResult<()> {
 
+    handle_friendly_ux_warnings(args).await;
+
     command::run_command(&args.command, &args).await.map_err(map_loc_err!())?;
 
     Ok(())
+}
+
+async fn handle_friendly_ux_warnings(args: &mut args::Args) {
+    if let args::Command::GenerateMissingKeys {} = args.command {
+        return;
+    }
+    match config::Config::read_from_file(&args.config).await.map_err(map_loc_err!()) {
+        Ok(local_config) => {
+            // Check if a key exists; if not offer to run "Command::GenerateMissingKeys"
+            match local_config.identity.read_public_key_ed25519_pem_file().await {
+                Ok(_) => { }
+                Err(e) => {
+                    tracing::info!("WARNING: {}", e);
+                    if sys_utils::ask_user_proceed_yn("Would you like to generate a private keypair now? (y/n) ").await {
+                        if let Err(e) = command::run_command(&args::Command::GenerateMissingKeys {}, &args).await.map_err(map_loc_err!()) {
+                            tracing::info!("ERROR: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::info!("WARNING: You have no config file located at {:?} ({})", &args.config, e);
+        }
+    }
 }
 
 

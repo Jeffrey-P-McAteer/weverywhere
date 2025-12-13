@@ -6,15 +6,15 @@ use wasmtime::*;
 
 pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> DynResult<()> {
 
-  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!())?;
 
-  let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+  let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!())?;
 
   if crate::v_is_info() {
       tracing::info!("Running {:?} ({})", file_path, fs_utils::format_size_bytes(wasm_bytes.len()) );
   }
 
-  let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+  let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!())?;
 
   let pd = executor::ProgramDataBuilder::new()
     .set_wasm_program_bytes(&wasm_bytes)
@@ -36,7 +36,7 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
 }
 
 pub async fn old_run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
-  let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+  let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!())?;
 
   if crate::v_is_info() {
       tracing::info!("Running {:?} ({}mb)", file_path, wasm_bytes.len() / 1_000_000);
@@ -113,7 +113,7 @@ pub async fn old_run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
 
   //debug_all_imports(&mut linker, &mut store, &module).map_err(map_loc_err!())?;
 
-  let instance = linker.instantiate_async(&mut store, &module).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+  let instance = linker.instantiate_async(&mut store, &module).await.map_err(map_loc_err!())?;
 
   // Get the exported function we want to call
   //let main_func = instance.get_typed_func::<(), i32>(&mut store, "_start").map_err(map_loc_err!())?;
@@ -124,7 +124,7 @@ pub async fn old_run_local(file_path: &std::path::PathBuf) -> DynResult<()> {
   println!("Initial fuel: {}", initial_fuel);
 
   // Execute the function and track fuel consumption
-  let result = main_func.call_async(&mut store, ()).await.map_err(map_loc_err!()).map_err(map_loc_err!())?;
+  let result = main_func.call_async(&mut store, ()).await.map_err(map_loc_err!())?;
 
   let remaining_fuel = store.get_fuel().map_err(map_loc_err!())?;
   let consumed_fuel = initial_fuel - remaining_fuel;

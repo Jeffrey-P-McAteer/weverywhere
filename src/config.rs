@@ -223,7 +223,7 @@ impl IdentityConfig {
     use der::Decode;
 
     // First, decode the PEM format to get the raw DER bytes
-    let pem = pem::parse(contents).map_err(map_loc_err!()).map_err(map_loc_err!())?;
+    let pem = pem::parse(contents).map_err(map_loc_err!())?;
 
     // Verify this is a private key
     if pem.tag() != "PRIVATE KEY" {
