@@ -166,6 +166,7 @@ def find_target_binary(t):
       return c
   raise Exception(f'Cannot find a binary for {t}')
 
+print()
 
 # rustc --print target-list
 targets = [
