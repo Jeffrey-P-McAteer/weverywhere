@@ -116,6 +116,56 @@ impl IdentityData {
     // Sign the hash
     signing_key.sign(&hash)
   }
+
+  pub fn check_self_signature_b(&self) -> bool {
+    match self.check_self_signature() {
+      Ok(_) => true,
+      Err(_e) => false,
+    }
+  }
+
+  pub fn check_self_signature(&self) -> DynResult<()> {
+    use ed25519_dalek::{Signature, Verifier};
+    use sha2::{Sha256, Digest};
+    // Hash the message with SHA-256
+    let mut hasher = sha2::Sha256::new();
+
+    hasher.update(self.human_name.as_bytes());
+    hasher.update(self.generated_at_utc0_epoch_s.to_le_bytes()); // Note: we use Little-Endian byte order for the signature. Arbitrary decision.
+    hasher.update(self.validity_s.to_le_bytes());
+    hasher.update(self.encoded_public_key_fmt.as_bytes());
+    hasher.update(&self.encoded_public_key);
+
+    let hash = hasher.finalize();
+    // #[allow(deprecated)] // Why is .as_slice() old? What replaces it?
+    // let hash_64: [u8; 64] = hash.as_slice().try_into().map_err(map_loc_err!())?; // If the length fails, we error out.
+
+    // Transform the encoded encoded_public_key into a key we can use to verify the signature
+    let pub_key_32: [u8; 32] = self.encoded_public_key.as_slice().try_into().map_err(map_loc_err!())?; // If the length fails, we error out.
+    let public_key = ed25519_dalek::VerifyingKey::from_bytes(&pub_key_32).map_err(map_loc_err!())?;
+
+    // Transform the serialized signature into a struct
+    let signature = ed25519_dalek::Signature::from_slice(self.signature.as_slice()).map_err(map_loc_err!())?;
+
+    // This will return with an Error if the signature does not match (see '?' at end)
+    let _ = public_key.verify(&hash, &signature).map_err(map_loc_err!())?;
+
+    // Signature is valid!
+
+    Ok(())
+  }
+
+  pub fn check_claimed_signature_b(&self) -> bool {
+    match self.check_claimed_signature() {
+      Ok(_) => true,
+      Err(_e) => false,
+    }
+  }
+
+  pub fn check_claimed_signature(&self) -> DynResult<()> {
+    std::unimplemented!()
+  }
+
 }
 
 

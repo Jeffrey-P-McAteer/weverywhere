@@ -155,8 +155,38 @@ impl Executor {
   }
 
   pub async fn exec(&self, program: &ProgramData) -> DynResult<()> {
+    // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
+    match program.source.check_self_signature() {
+      Ok(_) => { }
+      Err(e) => {
+        return Err(format!("The .source signature was invalid! {}", e).into());
+      }
+    }
+
+    let mut is_trusted = false;
+
+    for ref_m in self.trusted_keys.iter() {
+      // let a: u8 = ref_m.key();
+      // let b: u8 = ref_m.value();
+      if program.source.encoded_public_key == ref_m.value().as_bytes() {
+        is_trusted = true;
+      }
+    }
+
+    if is_trusted {
+      self.exec_trusted(program).await
+    }
+    else {
+      self.exec_untrusted(program).await
+    }
+  }
+
+  async fn exec_trusted(&self, program: &ProgramData) -> DynResult<()> {
     std::unimplemented!()
-    //Ok(())
+  }
+
+  async fn exec_untrusted(&self, program: &ProgramData) -> DynResult<()> {
+    std::unimplemented!()
   }
 
 }
