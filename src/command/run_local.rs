@@ -24,9 +24,9 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
     .set_source(&source)
     .build().map_err(map_loc_err!())?;
 
-  let executor = executor::Executor::new(&local_config);
+  let executor = executor::Executor::new(&local_config).await;
 
-  match executor.exec(&pd) {
+  match executor.exec(&pd).await {
     Ok(res) => {
       tracing::info!("res = {:?}", res);
     }

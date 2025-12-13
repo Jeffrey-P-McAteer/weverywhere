@@ -219,76 +219,9 @@ where T: serde::Serialize + serde::de::DeserializeOwned
 
 impl IdentityConfig {
   pub async fn read_private_key_ed25519_pem_file(&self) -> DynResult<ed25519_dalek::SigningKey> {
-    let contents = tokio::fs::read_to_string(&self.keyfile).await.map_err(map_loc_err!())?;
-    use der::Decode;
-
-    // First, decode the PEM format to get the raw DER bytes
-    let pem = pem::parse(contents).map_err(map_loc_err!())?;
-
-    // Verify this is a private key
-    if pem.tag() != "PRIVATE KEY" {
-        return Err(format!("Expected PRIVATE KEY label, got: {}", pem.tag()).into());
-    }
-
-    let der_bytes = pem.contents();
-
-    // Parse the DER bytes as a PKCS#8 PrivateKeyInfo structure
-    let private_key_info = pkcs8::PrivateKeyInfo::from_der(der_bytes).map_err(|non_std_err| format!("{:?}", non_std_err) ).map_err(map_loc_err!())?;
-
-    // Extract the raw private key bytes from the PKCS#8 structure
-    let private_key_bytes = private_key_info.private_key;
-
-    // The private key bytes for Ed25519 are wrapped in an OCTET STRING
-    // We need to parse this inner OCTET STRING to get the actual 32 bytes
-    let octet_string = der::asn1::OctetString::from_der(private_key_bytes).map_err(|non_std_err| format!("{:?}", non_std_err) ).map_err(map_loc_err!())?;
-    let key_bytes = octet_string.as_bytes();
-
-    // Ensure we have exactly 32 bytes
-    if key_bytes.len() != 32 {
-        return Err(format!("Expected 32 bytes for Ed25519 key, got {}", key_bytes.len()).into());
-    }
-
-    // Convert to array and create SigningKey
-    let mut key_array = [0u8; 32];
-    key_array.copy_from_slice(key_bytes);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
-
-    Ok(signing_key)
-
+    crypto_utils::read_private_key_ed25519_pem_file(&self.keyfile).await
   }
-
   pub async fn read_public_key_ed25519_pem_file(&self) -> DynResult<ed25519_dalek::VerifyingKey> {
-    let contents = tokio::fs::read_to_string(&self.keyfile).await.map_err(map_loc_err!())?;
-    use der::Decode;
-    // First, decode the PEM format to get the raw DER bytes
-    let pem = pem::parse(contents).map_err(map_loc_err!())?;
-    // Verify this is a private key
-    if pem.tag() != "PRIVATE KEY" {
-        return Err(format!("Expected PRIVATE KEY label, got: {}", pem.tag()).into());
-    }
-    let der_bytes = pem.contents();
-    // Parse the DER bytes as a PKCS#8 PrivateKeyInfo structure
-    let private_key_info = pkcs8::PrivateKeyInfo::from_der(der_bytes)
-        .map_err(|non_std_err| format!("{:?}", non_std_err)).map_err(map_loc_err!())?;
-    // Extract the raw private key bytes from the PKCS#8 structure
-    let private_key_bytes = private_key_info.private_key;
-    // The private key bytes for Ed25519 are wrapped in an OCTET STRING
-    // We need to parse this inner OCTET STRING to get the actual 32 bytes
-    let octet_string = der::asn1::OctetString::from_der(private_key_bytes)
-        .map_err(|non_std_err| format!("{:?}", non_std_err)).map_err(map_loc_err!())?;
-    let key_bytes = octet_string.as_bytes();
-    // Ensure we have exactly 32 bytes
-    if key_bytes.len() != 32 {
-        return Err(format!("Expected 32 bytes for Ed25519 key, got {}", key_bytes.len()).into());
-    }
-    // Convert to array and create SigningKey
-    let mut key_array = [0u8; 32];
-    key_array.copy_from_slice(key_bytes);
-    let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_array);
-
-    // Derive the public key from the private key
-    let verifying_key = signing_key.verifying_key();
-
-    Ok(verifying_key)
+    crypto_utils::read_public_key_ed25519_pem_file(&self.keyfile).await
   }
 }

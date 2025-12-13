@@ -114,8 +114,8 @@ pub struct RPStoreData {
 }
 
 impl Executor {
-  pub fn new(config: &config::Config) -> Executor {
-    Executor {
+  pub async fn new(config: &config::Config) -> Executor {
+    let mut ex = Executor {
       config: config.clone(),
 
       next_pid: std::sync::atomic::AtomicU64::new(0),
@@ -133,10 +133,28 @@ impl Executor {
 
 
 
+    };
+    match crypto_utils::read_public_key_ed25519_pem_file(&config.identity.keyfile).await {
+      Ok(our_pub_key) => {
+        ex.add_trusted_key(
+          config.identity.keyfile.file_name().map(|fn_osstr| fn_osstr.to_string_lossy().to_string() ).unwrap_or_else(|| "SELF".to_string() ),
+          &our_pub_key
+        );
+      }
+      Err(e) => {
+        if crate::v_is_info() {
+            tracing::info!("Error reading our own public key: {}", e );
+        }
+      }
     }
+    ex
   }
 
-  pub fn exec(&self, program: &ProgramData) -> DynResult<()> {
+  pub fn add_trusted_key<S: AsRef<str>>(&mut self, name: S, key: &ed25519_dalek::VerifyingKey) {
+    self.trusted_keys.insert(name.as_ref().into(), key.clone());
+  }
+
+  pub async fn exec(&self, program: &ProgramData) -> DynResult<()> {
     std::unimplemented!()
     //Ok(())
   }
