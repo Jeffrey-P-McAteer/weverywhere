@@ -18,7 +18,7 @@ pub struct Executor {
   trusted_allowed_instructions: std::sync::atomic::AtomicU64,
 
   /// Every program submited will get a unique number (PID) and RunningProgram entry here.
-  running_programs: dashmap::DashMap<u64, RunningProgram>,
+  running_programs: dashmap::DashMap<u64, std::sync::Arc<tokio::sync::RwLock<RunningProgram>> >,
 
   trusted_keys: dashmap::DashMap<String, ed25519_dalek::VerifyingKey>,
 
@@ -100,14 +100,15 @@ impl ProgramDataBuilder {
 pub struct RunningProgram {
   pub data: ProgramData,
 
+  pub config: wasmtime::Config,
   pub engine: wasmtime::Engine,
-  pub store: wasmtime::Store<RPStoreData>,
+  pub store: Option<wasmtime::Store<RPStoreData>>,
 
 }
 
 /// This structure participates in wasmtime function callbacks et al
 pub struct RPStoreData {
-  pub rp: Box<RunningProgram>, // MUST point to the RunningProgram struct which holds the related Store<RPStoreData>
+  pub rp: std::sync::Arc<tokio::sync::RwLock<RunningProgram>>, // MUST point to the RunningProgram struct which holds the related Store<RPStoreData>
   pub instruction_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
   pub max_instructions: u64,
   pub wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx,
@@ -154,7 +155,7 @@ impl Executor {
     self.trusted_keys.insert(name.as_ref().into(), key.clone());
   }
 
-  pub async fn exec(&self, program: &ProgramData) -> DynResult<()> {
+  pub async fn begin_exec(&mut self, program: &ProgramData) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -173,24 +174,71 @@ impl Executor {
       }
     }
 
-    if is_trusted {
-      self.exec_trusted(program).await
-    }
-    else {
-      self.exec_untrusted(program).await
-    }
+    self.create_pid(program, is_trusted).await
   }
 
-  async fn exec_trusted(&self, program: &ProgramData) -> DynResult<()> {
+  fn create_next_pid(&mut self) -> u64 {
+    self.next_pid.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+  }
+
+  async fn terminate_running_pid(&mut self, pid: u64) -> DynResult<()> {
+    tracing::info!("TODO implement {}:{}", file!(), line!());
+    Ok(())
+  }
+
+  async fn create_pid(&mut self, program: &ProgramData, program_is_trusted: bool) -> DynResult<u64> {
+    // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
+    let this_program_pid = self.create_next_pid();
+
+    self.terminate_running_pid(this_program_pid).await?;
+
+    let mut config = wasmtime::Config::new();
+    config.consume_fuel(true); // Enable fuel tracking for instruction counting
+    config.async_support(true); // Affects APIs available
+
+    let engine = wasmtime::Engine::new(&config).map_err(map_loc_err!())?;
+
+    let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
+      .inherit_stdout()   // allow fd_write to stdout
+      .inherit_stderr()   // allow fd_write to stderr
+      // NOTE: do NOT call inherit_stdin()
+      // NOTE: do NOT call preopen_dir()
+      // NOTE: do NOT call inherit_args() unless you want argv
+      // NOTE: do NOT call inherit_env() unless you want env vars
+      //.build();
+      .build_p1();
+
+
+    // Construct a Running Program and begin executing it
+    let arc_rp_data = std::sync::Arc::new(tokio::sync::RwLock::new(RunningProgram {
+      data: program.clone(),
+      config: config,
+      engine: engine.clone(),
+      store: None,
+    }));
+
+    let rps_store_data = RPStoreData {
+      rp: arc_rp_data.clone(),
+      instruction_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+      max_instructions: 16 * 1024, // todo
+      wasi_p1_ctx: wasi_ctx,
+    };
+
+    { // Self-referential magic, now we can place the value in .store
+      let mut write_lock = arc_rp_data.write().await;
+      write_lock.store = Some(wasmtime::Store::new(&engine, rps_store_data));
+    }
+
+    self.running_programs.insert(this_program_pid, arc_rp_data);
+
     std::unimplemented!()
   }
 
-  async fn exec_untrusted(&self, program: &ProgramData) -> DynResult<()> {
-    std::unimplemented!()
+  pub async fn wait_for_pid_exit(&self, pid: u64) -> DynResult<u32> {
+    std::unimplemented!();
+    Ok(0)
   }
 
 }
-
-
 
 

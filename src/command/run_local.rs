@@ -24,11 +24,14 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
     .set_source(&source)
     .build().map_err(map_loc_err!())?;
 
-  let executor = executor::Executor::new(&local_config).await;
+  let mut executor = executor::Executor::new(&local_config).await;
 
-  match executor.exec(&pd).await {
-    Ok(res) => {
-      tracing::info!("res = {:?}", res);
+  match executor.begin_exec(&pd).await {
+    Ok(running_pid) => {
+      tracing::info!("Spawned PID {}", running_pid);
+      // TODO stdio stuff here?
+      let exit_code = executor.wait_for_pid_exit(running_pid).await?;
+      tracing::info!("Exited with code {}", exit_code);
     }
     Err(e) => {
       tracing::info!("e = {:?}", e);
