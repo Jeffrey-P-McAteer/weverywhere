@@ -102,17 +102,17 @@ def get_most_recent_sdk(sdk_cache_dir):
 # (Assuming exec on x86_64 linux system)
 # We must manually download a copy of the mingw build tools which zig calls out to - https://packages.msys2.org/packages/mingw-w64-cross-mingw64-binutils?variant=x86_64
 
-if not shutil.which('x86_64-w64-mingw32-dlltool'):
+if True or not shutil.which('x86_64-w64-mingw32-dlltool'): # Always use the downloaded copy!
   mingw32_tools_folder = os.path.join(pathlib.Path.home(), '.cache', 'mingw32_tools_folder')
   os.makedirs(mingw32_tools_folder, exist_ok=True)
   print(f'x86_64-w64-mingw32-dlltool not found, loading from {mingw32_tools_folder}')
   os.environ['PATH'] = os.pathsep.join([
-      os.environ['PATH'],
       mingw32_tools_folder,
       os.path.join(mingw32_tools_folder, 'bin'),
       os.path.join(mingw32_tools_folder, 'usr', 'bin'),
       os.path.join(mingw32_tools_folder, 'opt', 'bin'),
       os.path.join(mingw32_tools_folder, 'opt', 'x86_64-w64-mingw32', 'bin'),
+      os.environ['PATH'],
   ])
   if not shutil.which('x86_64-w64-mingw32-dlltool'):
     # with urllib.request.urlopen('https://packages.msys2.org/packages/mingw-w64-cross-mingw64-binutils?variant=x86_64') as response:
