@@ -19,8 +19,15 @@ pub struct Executor {
 
   /// Every program submited will get a unique number (PID) and RunningProgram entry here.
   running_programs: dashmap::DashMap<u64, std::sync::Arc<tokio::sync::RwLock<RunningProgram>> >,
+  pid_last_exit_code: dashmap::DashMap<u64, u32>,
 
   trusted_keys: dashmap::DashMap<String, ed25519_dalek::VerifyingKey>,
+
+  /// Efficient OS primitive to wake up a ton of .await-ers.
+  /// This one is fired every time a PID exits. The exit code may be found in pid_last_exit_code until a new process
+  /// with the same PID is launched, at which point the code will be 0 until the process exits.
+  pid_exit_signal: tokio::sync::Notify,
+  running_programs_insert_signal: tokio::sync::Notify,
 
   event_loop_handle: tokio::task::JoinHandle<()>,
 
@@ -193,9 +200,13 @@ impl Executor {
             // We use a high shard count (128) here on the expectation that many processes will be running in parallel,
             // and we want to enable lots of write capacity. This is a similar reason as why we have a large capacity up-front.
             running_programs: dashmap::DashMap::with_capacity_and_shard_amount(16 * 1024, 128),
+            pid_last_exit_code: dashmap::DashMap::with_capacity_and_shard_amount(16 * 1024, 128),
 
             // We expect fewer writes to these during run-time, so we lower the shard amount to reduce overhead
             trusted_keys: dashmap::DashMap::with_capacity_and_shard_amount(256, 8),
+
+            pid_exit_signal: tokio::sync::Notify::new(),
+            running_programs_insert_signal: tokio::sync::Notify::new(),
 
             event_loop_handle: event_loop_handle,
 
@@ -206,9 +217,15 @@ impl Executor {
 
   pub async fn event_loop(&self) {
     loop {
-      tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-      tracing::info!("event_loop tick!");
-      // TODO
+      let new_running_program = self.running_programs_insert_signal.notified();
+      if crate::v_is_everything() {
+        tracing::info!("event_loop waiting on new_running_program.await;");
+      }
+      new_running_program.await;
+
+      // Iterate all running programs, spawning ones which are setup to be run in their on Tokio tasks
+      // suitable for running on any thread pool thread
+
     }
   }
 
@@ -243,7 +260,9 @@ impl Executor {
   }
 
   async fn terminate_running_pid(&self, pid: u64) -> DynResult<()> {
-    tracing::info!("TODO implement {}:{}", file!(), line!());
+    if let Some(entry) = self.running_programs.get(&pid) {
+      tracing::info!("TODO implement {}:{}", file!(), line!());
+    }
     Ok(())
   }
 
@@ -292,15 +311,23 @@ impl Executor {
 
     self.running_programs.insert(this_program_pid, arc_rp_data);
 
-    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+    self.running_programs_insert_signal.notify_waiters();
 
-    std::unimplemented!()
+    Ok(this_program_pid)
   }
 
   pub async fn wait_for_pid_exit(&self, pid: u64) -> DynResult<u32> {
-    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
-    std::unimplemented!();
-    Ok(0)
+    loop {
+      let pid_exit_notified = self.pid_exit_signal.notified();
+      if crate::v_is_everything() {
+        tracing::info!("wait_for_pid_exit is checking to see if {} has exited...", pid);
+      }
+      if !self.running_programs.contains_key(&pid) {
+        break;
+      }
+      pid_exit_notified.await;
+    }
+    Ok( self.pid_last_exit_code.get(&pid).map(|r| *r.value() ).unwrap_or(0) )
   }
 
 }
