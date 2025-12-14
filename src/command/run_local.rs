@@ -24,7 +24,7 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
     .set_source(&source)
     .build().map_err(map_loc_err!())?;
 
-  let mut executor = executor::Executor::new(&local_config).await;
+  let executor = executor::Executor::new(&local_config).await;
 
   match executor.begin_exec(&pd).await {
     Ok(running_pid) => {

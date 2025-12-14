@@ -22,6 +22,9 @@ pub struct Executor {
 
   trusted_keys: dashmap::DashMap<String, ed25519_dalek::VerifyingKey>,
 
+  event_loop_handle: tokio::task::JoinHandle<()>,
+
+  startup_handle: tokio::task::JoinHandle<()>, // Used to confirm that any async start-up tasks have completed
 
 }
 
@@ -111,51 +114,109 @@ pub struct RPStoreData {
   pub rp: std::sync::Arc<tokio::sync::RwLock<RunningProgram>>, // MUST point to the RunningProgram struct which holds the related Store<RPStoreData>
   pub instruction_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
   pub max_instructions: u64,
-  pub wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx,
+  pub wasi_p1_ctx: std::sync::Arc<tokio::sync::RwLock<wasmtime_wasi::p1::WasiP1Ctx>>,
 }
 
+unsafe impl Send for RPStoreData { } // TODO audit me
+unsafe impl Sync for RPStoreData { } // TODO audit me
+
+
 impl Executor {
-  pub async fn new(config: &config::Config) -> Executor {
-    let mut ex = Executor {
-      config: config.clone(),
+  pub async fn new(config: &config::Config) -> std::sync::Arc<Executor> {
+    let config = config.clone();
+    std::sync::Arc::new_cyclic(|weak_ref| {
+        // Upgrade inside the task
+        let event_loop_weak_ref = weak_ref.clone();
+        let event_loop_handle = tokio::spawn(async move {
+            for _ in 0..10000 { // 5ms pauses, so in an error state where weak_ref is never populated we run for a max of 50s
+              match event_loop_weak_ref.upgrade() {
+                Some(arc) => {
+                  let arc: std::sync::Arc<Executor> = arc; // Compiler forgot what type we were -_-
+                  arc.event_loop().await;
+                  break;
+                }
+                None => {
+                  if crate::v_is_everything() {
+                    tracing::info!("event_loop_weak_ref.upgrade() is None");
+                  }
+                  tokio::time::sleep(std::time::Duration::from_millis(5)).await; // Wait until we are constructed
+                }
+              }
+            }
+        });
 
-      next_pid: std::sync::atomic::AtomicU64::new(0),
+        // We also assign the trusted key async; note that this means there is a very tiny amount of time
+        // when we may not trust ourselves, so tasks being performed quickly should confirm that there is at least 1 trusted key
+        // before assuming the trust store has been filled
+        let initialization_work_weak_ref = weak_ref.clone();
+        let our_identity_keyfile = config.identity.keyfile.clone();
+        let startup_handle = tokio::spawn(async move {
+          match crypto_utils::read_public_key_ed25519_pem_file(&our_identity_keyfile).await {
+            Ok(our_pub_key) => {
+              for _ in 0..10000 { // 5ms pauses, so in an error state where weak_ref is never populated we run for a max of 50s
+                match initialization_work_weak_ref.upgrade() {
+                  Some(arc) => {
+                    let arc: std::sync::Arc<Executor> = arc; // Compiler forgot what type we were -_-
+                    arc.add_trusted_key(
+                      our_identity_keyfile.file_name().map(|fn_osstr| fn_osstr.to_string_lossy().to_string() ).unwrap_or_else(|| "SELF".to_string() ),
+                      &our_pub_key
+                    );
+                    break;
+                  }
+                  None => {
+                    if crate::v_is_everything() {
+                      tracing::info!("initialization_work_weak_ref.upgrade() is None");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await; // Wait until we are constructed
+                  }
+                }
+              }
+            }
+            Err(e) => {
+              if crate::v_is_info() {
+                  tracing::info!("Error reading our own public key: {}", e );
+              }
+            }
+          }
+        });
 
-      untrusted_allowed_instructions: std::sync::atomic::AtomicU64::new(16 * 1024),
+        // We now have a self-referrential Executor with some background logic going on, yay!
+        Executor {
+            config: config.clone(),
 
-      trusted_allowed_instructions: std::sync::atomic::AtomicU64::new(u64::MAX),
+            next_pid: std::sync::atomic::AtomicU64::new(0),
 
-      // We use a high shard count (128) here on the expectation that many processes will be running in parallel,
-      // and we want to enable lots of write capacity. This is a similar reason as why we have a large capacity up-front.
-      running_programs: dashmap::DashMap::with_capacity_and_shard_amount(16 * 1024, 128),
+            untrusted_allowed_instructions: std::sync::atomic::AtomicU64::new(16 * 1024),
 
-      // We expect fewer writes to these during run-time, so we lower the shard amount to reduce overhead
-      trusted_keys: dashmap::DashMap::with_capacity_and_shard_amount(256, 8),
+            trusted_allowed_instructions: std::sync::atomic::AtomicU64::new(u64::MAX),
 
+            // We use a high shard count (128) here on the expectation that many processes will be running in parallel,
+            // and we want to enable lots of write capacity. This is a similar reason as why we have a large capacity up-front.
+            running_programs: dashmap::DashMap::with_capacity_and_shard_amount(16 * 1024, 128),
 
+            // We expect fewer writes to these during run-time, so we lower the shard amount to reduce overhead
+            trusted_keys: dashmap::DashMap::with_capacity_and_shard_amount(256, 8),
 
-    };
-    match crypto_utils::read_public_key_ed25519_pem_file(&config.identity.keyfile).await {
-      Ok(our_pub_key) => {
-        ex.add_trusted_key(
-          config.identity.keyfile.file_name().map(|fn_osstr| fn_osstr.to_string_lossy().to_string() ).unwrap_or_else(|| "SELF".to_string() ),
-          &our_pub_key
-        );
-      }
-      Err(e) => {
-        if crate::v_is_info() {
-            tracing::info!("Error reading our own public key: {}", e );
+            event_loop_handle: event_loop_handle,
+
+            startup_handle: startup_handle,
         }
-      }
-    }
-    ex
+    })
   }
 
-  pub fn add_trusted_key<S: AsRef<str>>(&mut self, name: S, key: &ed25519_dalek::VerifyingKey) {
+  pub async fn event_loop(&self) {
+    loop {
+      tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+      tracing::info!("event_loop tick!");
+      // TODO
+    }
+  }
+
+  pub fn add_trusted_key<S: AsRef<str>>(&self, name: S, key: &ed25519_dalek::VerifyingKey) {
     self.trusted_keys.insert(name.as_ref().into(), key.clone());
   }
 
-  pub async fn begin_exec(&mut self, program: &ProgramData) -> DynResult<u64> {
+  pub async fn begin_exec(&self, program: &ProgramData) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -177,16 +238,16 @@ impl Executor {
     self.create_pid(program, is_trusted).await
   }
 
-  fn create_next_pid(&mut self) -> u64 {
+  fn create_next_pid(&self) -> u64 {
     self.next_pid.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
   }
 
-  async fn terminate_running_pid(&mut self, pid: u64) -> DynResult<()> {
+  async fn terminate_running_pid(&self, pid: u64) -> DynResult<()> {
     tracing::info!("TODO implement {}:{}", file!(), line!());
     Ok(())
   }
 
-  async fn create_pid(&mut self, program: &ProgramData, program_is_trusted: bool) -> DynResult<u64> {
+  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool) -> DynResult<u64> {
     // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
     let this_program_pid = self.create_next_pid();
 
@@ -221,7 +282,7 @@ impl Executor {
       rp: arc_rp_data.clone(),
       instruction_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
       max_instructions: 16 * 1024, // todo
-      wasi_p1_ctx: wasi_ctx,
+      wasi_p1_ctx: std::sync::Arc::new(tokio::sync::RwLock::new(wasi_ctx)),
     };
 
     { // Self-referential magic, now we can place the value in .store
@@ -231,10 +292,13 @@ impl Executor {
 
     self.running_programs.insert(this_program_pid, arc_rp_data);
 
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+
     std::unimplemented!()
   }
 
   pub async fn wait_for_pid_exit(&self, pid: u64) -> DynResult<u32> {
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
     std::unimplemented!();
     Ok(0)
   }
