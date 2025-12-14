@@ -7,6 +7,9 @@ use crate::args::*;
  **/
 pub struct Executor {
 
+  /// We need to keep a thread-safe copy of ourselves for use in passed-off threads -_-
+  self_weakref: std::sync::Weak<Executor>,
+
   /// Stores host-set configuration such as which PKI identities are trusted
   ///
   config: config::Config,
@@ -111,9 +114,10 @@ pub struct RunningProgram {
   pub data: ProgramData,
 
   pub config: wasmtime::Config,
-  pub engine: wasmtime::Engine,
-  pub store: Option<wasmtime::Store<RPStoreData>>,
-
+  pub engine: std::sync::Arc<tokio::sync::RwLock<wasmtime::Engine>>,
+  pub store: tokio::sync::RwLock<Option<wasmtime::Store<RPStoreData>>>,
+  pub module: tokio::sync::RwLock<Option<wasmtime::Module>>,
+  pub linker: tokio::sync::RwLock<Option<wasmtime::Linker<RPStoreData>>>,
 }
 
 /// This structure participates in wasmtime function callbacks et al
@@ -121,7 +125,8 @@ pub struct RPStoreData {
   pub rp: std::sync::Arc<tokio::sync::RwLock<RunningProgram>>, // MUST point to the RunningProgram struct which holds the related Store<RPStoreData>
   pub instruction_count: std::sync::Arc<std::sync::atomic::AtomicU64>,
   pub max_instructions: u64,
-  pub wasi_p1_ctx: std::sync::Arc<tokio::sync::RwLock<wasmtime_wasi::p1::WasiP1Ctx>>,
+  //pub wasi_p1_ctx: std::sync::Arc<tokio::sync::RwLock<wasmtime_wasi::p1::WasiP1Ctx>>,
+  pub wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx,
 }
 
 unsafe impl Send for RPStoreData { } // TODO audit me
@@ -189,6 +194,8 @@ impl Executor {
 
         // We now have a self-referrential Executor with some background logic going on, yay!
         Executor {
+            self_weakref: weak_ref.clone(),
+
             config: config.clone(),
 
             next_pid: std::sync::atomic::AtomicU64::new(0),
@@ -225,8 +232,15 @@ impl Executor {
 
       // Iterate all running programs, spawning ones which are setup to be run in their on Tokio tasks
       // suitable for running on any thread pool thread
+      for rp in &self.running_programs {
+
+      }
 
     }
+  }
+
+  pub async fn event_loop_run_program(&self) {
+
   }
 
   pub fn add_trusted_key<S: AsRef<str>>(&self, name: S, key: &ed25519_dalek::VerifyingKey) {
@@ -293,21 +307,102 @@ impl Executor {
     let arc_rp_data = std::sync::Arc::new(tokio::sync::RwLock::new(RunningProgram {
       data: program.clone(),
       config: config,
-      engine: engine.clone(),
-      store: None,
+      engine: std::sync::Arc::new(tokio::sync::RwLock::new(engine)),
+      store: tokio::sync::RwLock::new(None),
+      module: tokio::sync::RwLock::new(None),
+      linker: tokio::sync::RwLock::new(None),
     }));
 
     let rps_store_data = RPStoreData {
       rp: arc_rp_data.clone(),
       instruction_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
       max_instructions: 16 * 1024, // todo
-      wasi_p1_ctx: std::sync::Arc::new(tokio::sync::RwLock::new(wasi_ctx)),
+      //wasi_p1_ctx: std::sync::Arc::new(tokio::sync::RwLock::new(wasi_ctx)),
+      wasi_p1_ctx: wasi_ctx,
     };
 
     { // Self-referential magic, now we can place the value in .store
-      let mut write_lock = arc_rp_data.write().await;
-      write_lock.store = Some(wasmtime::Store::new(&engine, rps_store_data));
+      let write_lock = arc_rp_data.read().await;
+      let engine_read_lock = write_lock.engine.read().await;
+      let mut store = wasmtime::Store::new(&engine_read_lock, rps_store_data);
+      // Set initial fuel (roughly corresponds to instruction count)
+      store.set_fuel(128_000).map_err(map_loc_err!())?;
+
+      *write_lock.store.write().await = Some(store);
     }
+
+    // We also must link against all of OUR apis
+    {
+      let write_lock = arc_rp_data.write().await;
+      let engine_read_lock = write_lock.engine.read().await;
+      let mut linker = wasmtime::Linker::new(&engine_read_lock);
+
+      wasmtime_wasi::p1::add_to_linker_async::<RPStoreData>(&mut linker, |linker_store_data| {
+          &mut linker_store_data.wasi_p1_ctx
+      }).map_err(map_loc_err!())?;
+
+      // Bind a custom "env" module with a "log" function
+      linker.func_wrap(
+          "env",
+          "log",
+          |_caller: wasmtime::Caller<'_, RPStoreData>, ptr: i32, len: i32| -> wasmtime::Result<()> {
+              tracing::info!("[WASM] Log called with ptr={}, len={}", ptr, len);
+              Ok(())
+          },
+      ).map_err(map_loc_err!())?;
+
+      // Add another custom function that returns a value
+      linker.func_wrap(
+          "env",
+          "get_magic_number",
+          |_caller: wasmtime::Caller<'_, RPStoreData>| -> wasmtime::Result<i32> {
+              tracing::info!("[HOST] get_magic_number called, returning 42");
+              Ok(42)
+          },
+      ).map_err(map_loc_err!())?;
+
+      *write_lock.linker.write().await = Some(linker);
+    }
+
+    { // Assign to .module
+      let write_lock = arc_rp_data.read().await;
+      let engine_read_lock = write_lock.engine.read().await;
+      let module = wasmtime::Module::new(&engine_read_lock, &program.wasm_program_bytes).map_err(map_loc_err!())?;
+
+      *write_lock.module.write().await = Some(module);
+    }
+
+    // For now we'll just spawn main off in a new tokio task
+    let running_arc_rp_data = arc_rp_data.clone();
+    let runner_t_self_weakref = self.self_weakref.clone();
+    tokio::spawn(async move {
+      let write_lock = running_arc_rp_data.write().await;
+
+      let mut linker_lock = write_lock.linker.write().await;
+      let write_lock_module = write_lock.module.read().await;
+      let mut write_lock_store = write_lock.store.write().await;
+
+      let instance = linker_lock.as_mut().unwrap().instantiate_async(
+        &mut write_lock_store.as_mut().unwrap(),
+        &write_lock_module.as_ref().unwrap()
+      ).await.map_err(map_loc_err!()).expect("TODO write better proofs that we are Some(T)!");
+
+      let main_func = instance.get_typed_func::<(), ()>(&mut write_lock_store.as_mut().unwrap(), "_start").map_err(map_loc_err!()).expect("TODO move us out");
+      let result = main_func.call_async(&mut write_lock_store.as_mut().unwrap(), ()).await.map_err(map_loc_err!()).expect("TODO move us out");
+
+      // Set exit code
+      if let Some(self_arc) = runner_t_self_weakref.upgrade() {
+        self_arc.running_programs.remove(&this_program_pid);
+        self_arc.pid_last_exit_code.insert(this_program_pid, 0);
+        self_arc.pid_exit_signal.notify_waiters();
+      }
+      else {
+        if crate::v_is_everything() {
+          tracing::info!("runner_t_self_weakref.upgrade() was None! ({}:{})", file!(), line!());
+        }
+      }
+
+    });
 
     self.running_programs.insert(this_program_pid, arc_rp_data);
 
