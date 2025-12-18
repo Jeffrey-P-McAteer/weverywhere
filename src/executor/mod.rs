@@ -408,6 +408,7 @@ impl Executor {
                     if crate::v_is_everything() {
                       tracing::info!("runner_t_self_weakref.upgrade() was None! ({}:{})", file!(), line!());
                     }
+                    // We can't remove the PID and we can't notify anyone. This is bad, TODO add resiliancy or something.
                   }
                 }
                 Err(e) => {
