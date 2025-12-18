@@ -118,6 +118,10 @@ pub struct RunningProgram {
   pub store: tokio::sync::RwLock<Option<wasmtime::Store<RPStoreData>>>,
   pub module: tokio::sync::RwLock<Option<wasmtime::Module>>,
   pub linker: tokio::sync::RwLock<Option<wasmtime::Linker<RPStoreData>>>,
+
+  /// For errors which occur after inserting into the running process map this will be set, and
+  /// when set the program should not be considered running.
+  pub spawn_error: tokio::sync::RwLock<Option<Box<dyn std::error::Error + Send + Sync>>>,
 }
 
 /// This structure participates in wasmtime function callbacks et al
@@ -311,6 +315,7 @@ impl Executor {
       store: tokio::sync::RwLock::new(None),
       module: tokio::sync::RwLock::new(None),
       linker: tokio::sync::RwLock::new(None),
+      spawn_error: tokio::sync::RwLock::new(None),
     }));
 
     let rps_store_data = RPStoreData {
@@ -389,23 +394,58 @@ impl Executor {
 
       match instance_res {
         Ok(instance) => {
-          let main_func = instance.get_typed_func::<(), ()>(&mut write_lock_store.as_mut().unwrap(), "_start").map_err(map_loc_err!()).expect("TODO move us out");
-          let result = main_func.call_async(&mut write_lock_store.as_mut().unwrap(), ()).await.map_err(map_loc_err!()).expect("TODO move us out");
-
-          // Set exit code
-          if let Some(self_arc) = runner_t_self_weakref.upgrade() {
-            self_arc.running_programs.remove(&this_program_pid);
-            self_arc.pid_last_exit_code.insert(this_program_pid, 0);
-            self_arc.pid_exit_signal.notify_waiters();
-          }
-          else {
-            if crate::v_is_everything() {
-              tracing::info!("runner_t_self_weakref.upgrade() was None! ({}:{})", file!(), line!());
+          match instance.get_typed_func::<(), ()>(&mut write_lock_store.as_mut().unwrap(), "_start").map_err(map_loc_err!()) {
+            Ok(main_func) => {
+              match main_func.call_async(&mut write_lock_store.as_mut().unwrap(), ()).await.map_err(map_loc_err!()) {
+                Ok(result) => {
+                  // Set exit code
+                  if let Some(self_arc) = runner_t_self_weakref.upgrade() {
+                    self_arc.running_programs.remove(&this_program_pid);
+                    self_arc.pid_last_exit_code.insert(this_program_pid, 0);
+                    self_arc.pid_exit_signal.notify_waiters();
+                  }
+                  else {
+                    if crate::v_is_everything() {
+                      tracing::info!("runner_t_self_weakref.upgrade() was None! ({}:{})", file!(), line!());
+                    }
+                  }
+                }
+                Err(e) => {
+                  tracing::info!("{}", e);
+                  {
+                    *write_lock.spawn_error.write().await = Some(e.into());
+                  }
+                  if let Some(self_arc) = runner_t_self_weakref.upgrade() {
+                    self_arc.running_programs.remove(&this_program_pid);
+                    self_arc.pid_last_exit_code.insert(this_program_pid, 1);
+                    self_arc.pid_exit_signal.notify_waiters();
+                  }
+                }
+              }
+            }
+            Err(e) => {
+              tracing::info!("{}", e);
+              {
+                *write_lock.spawn_error.write().await = Some(e.into());
+              }
+              if let Some(self_arc) = runner_t_self_weakref.upgrade() {
+                  self_arc.running_programs.remove(&this_program_pid);
+                  self_arc.pid_last_exit_code.insert(this_program_pid, 1);
+                  self_arc.pid_exit_signal.notify_waiters();
+                }
             }
           }
         }
         Err(e) => {
-          eprintln!("{}", e);
+          tracing::info!("{}", e);
+          {
+            *write_lock.spawn_error.write().await = Some(e.into());
+          }
+          if let Some(self_arc) = runner_t_self_weakref.upgrade() {
+            self_arc.running_programs.remove(&this_program_pid);
+            self_arc.pid_last_exit_code.insert(this_program_pid, 1);
+            self_arc.pid_exit_signal.notify_waiters();
+          }
         }
       }
 
@@ -424,9 +464,17 @@ impl Executor {
       if crate::v_is_everything() {
         tracing::info!("wait_for_pid_exit is checking to see if {} has exited...", pid);
       }
+      // If pid has been removed, has exited.
       if !self.running_programs.contains_key(&pid) {
         break;
       }
+
+      if let Some(program_data) = self.running_programs.get(&pid) {
+        if let Some(spawn_error) = program_data.read().await.spawn_error.write().await.take() { // Ownership: .take() places None back in if it was taken
+          return Err(spawn_error); // And some caller gets the spawn error and is responsible for handling it
+        }
+      }
+
       pid_exit_notified.await;
     }
     Ok( self.pid_last_exit_code.get(&pid).map(|r| *r.value() ).unwrap_or(0) )
