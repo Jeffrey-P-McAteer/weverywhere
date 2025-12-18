@@ -4,33 +4,16 @@
 
 // TODO lotsa design work?
 
-__attribute__((export_name("do_report")))
-int do_report(char* out, unsigned int out_len) {
-
-  if (out_len > 10) {
-    out[0] = 'H';
-    out[1] = 'e';
-    out[2] = 'l';
-    out[3] = 'l';
-    out[4] = 'o';
-    out[5] = ' ';
-    out[6] = 'W';
-    out[7] = 'o';
-    out[8] = 'r';
-    out[9] = 'l';
-    out[10] = 'd';
-    out[11] = '\0';
-  }
-
-  return 0;
-}
+// Imported host function
+__attribute__((import_module("host"), import_name("print")))
+void host_print(const char* ptr, int len);
 
 __attribute__((export_name("_start")))
 void _start() {
 
-  char* out;
-  unsigned int out_len = 0;
+  const char* out = "Hello World";
+  unsigned int out_len = sizeof(out) - 1;
 
-  do_report(out, out_len);
+  host_print(out, out_len);
 
 }

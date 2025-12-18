@@ -341,12 +341,12 @@ impl Executor {
           &mut linker_store_data.wasi_p1_ctx
       }).map_err(map_loc_err!())?;
 
-      // Bind a custom "env" module with a "log" function
+      // Bind a custom "host" module with a "print" function
       linker.func_wrap(
-          "env",
-          "log",
+          "host",
+          "pri  nt",
           |_caller: wasmtime::Caller<'_, RPStoreData>, ptr: i32, len: i32| -> wasmtime::Result<()> {
-              tracing::info!("[WASM] Log called with ptr={}, len={}", ptr, len);
+              tracing::info!("[WASM] Print called with ptr={}, len={}", ptr, len);
               Ok(())
           },
       ).map_err(map_loc_err!())?;
@@ -382,23 +382,30 @@ impl Executor {
       let write_lock_module = write_lock.module.read().await;
       let mut write_lock_store = write_lock.store.write().await;
 
-      let instance = linker_lock.as_mut().unwrap().instantiate_async(
+      let instance_res = linker_lock.as_mut().unwrap().instantiate_async(
         &mut write_lock_store.as_mut().unwrap(),
         &write_lock_module.as_ref().unwrap()
-      ).await.map_err(map_loc_err!()).expect("TODO write better proofs that we are Some(T)!");
+      ).await.map_err(map_loc_err!());
 
-      let main_func = instance.get_typed_func::<(), ()>(&mut write_lock_store.as_mut().unwrap(), "_start").map_err(map_loc_err!()).expect("TODO move us out");
-      let result = main_func.call_async(&mut write_lock_store.as_mut().unwrap(), ()).await.map_err(map_loc_err!()).expect("TODO move us out");
+      match instance_res {
+        Ok(instance) => {
+          let main_func = instance.get_typed_func::<(), ()>(&mut write_lock_store.as_mut().unwrap(), "_start").map_err(map_loc_err!()).expect("TODO move us out");
+          let result = main_func.call_async(&mut write_lock_store.as_mut().unwrap(), ()).await.map_err(map_loc_err!()).expect("TODO move us out");
 
-      // Set exit code
-      if let Some(self_arc) = runner_t_self_weakref.upgrade() {
-        self_arc.running_programs.remove(&this_program_pid);
-        self_arc.pid_last_exit_code.insert(this_program_pid, 0);
-        self_arc.pid_exit_signal.notify_waiters();
-      }
-      else {
-        if crate::v_is_everything() {
-          tracing::info!("runner_t_self_weakref.upgrade() was None! ({}:{})", file!(), line!());
+          // Set exit code
+          if let Some(self_arc) = runner_t_self_weakref.upgrade() {
+            self_arc.running_programs.remove(&this_program_pid);
+            self_arc.pid_last_exit_code.insert(this_program_pid, 0);
+            self_arc.pid_exit_signal.notify_waiters();
+          }
+          else {
+            if crate::v_is_everything() {
+              tracing::info!("runner_t_self_weakref.upgrade() was None! ({}:{})", file!(), line!());
+            }
+          }
+        }
+        Err(e) => {
+          eprintln!("{}", e);
         }
       }
 
