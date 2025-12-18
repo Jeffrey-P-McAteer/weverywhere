@@ -4,6 +4,15 @@
 name = "Jeff's Test Server"
 keyfile = "/tmp/weverywhere-test.pem"
 
+[limits.trusted]
+max_cpu_instructions = 4611686018427387904 # 2**62
+max_memory_bytes = 4611686018427387904
+
+[limits.untrusted]
+max_cpu_instructions = 65536
+max_memory_bytes = 65536
+
+
 # This block may be duplicated, it is a list of objects with the property 'path'. All include paths will be glob-resolved and
 # configuration is appled in-order of traversal.
 [[includes]]

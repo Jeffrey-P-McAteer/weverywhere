@@ -17,7 +17,30 @@ pub struct Config {
 
   #[serde(default)]
   pub includes: Vec<SingleInclude>,
+
+  #[serde(default)]
+  pub limits: Limits,
 }
+
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
+#[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
+pub struct Limits {
+  #[serde(default)]
+  trusted: Limit,
+  #[serde(default)]
+  untrusted: Limit,
+}
+
+#[derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
+#[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
+pub struct Limit {
+  #[serde(default)]
+  max_cpu_instructions: u64,
+
+  #[serde(default)]
+  max_memory_bytes: u64,
+}
+
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, optionable::Optionable)]
 #[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
@@ -218,6 +241,10 @@ async fn process_config_override_file(config: &Config, override_file_path: &std:
     trusted: fancy_omerge_vec(config_o.trusted, override_data.trusted)?,
     startup_program: fancy_omerge_vec(config_o.startup_program, override_data.startup_program)?,
     includes: fancy_omerge_vec(config_o.includes, override_data.includes)?,
+    limits: Some(LimitsOpt { // Oh god -_- at least it's read-once config data.
+      trusted: Some(fancy_omerge(config_o.limits.clone().unwrap_or_else(|| Default::default()).trusted, override_data.limits.clone().unwrap_or_else(|| Default::default()).trusted)?.unwrap_or_else(|| Default::default())),
+      untrusted: Some(fancy_omerge(config_o.limits.clone().unwrap_or_else(|| Default::default()).untrusted, override_data.limits.clone().unwrap_or_else(|| Default::default()).untrusted)?.unwrap_or_else(|| Default::default())),
+    }),
 
     // TODO other top-level fields here
   };
