@@ -48,11 +48,13 @@ pub enum Command {
         /// within the folder, unless --install-etc and or --install-bin are passed.
         install_root: std::path::PathBuf,
 
-        #[arg(long)]
-        install_etc: Option<std::path::PathBuf>,
+        /// An override for the path to etc relative to INSTALL_ROOT
+        #[arg(long, default_value = "etc")]
+        install_etc: std::path::PathBuf,
 
-        #[arg(long)]
-        install_bin: Option<std::path::PathBuf>,
+        /// An override for the path to bin relative to INSTALL_ROOT
+        #[arg(long, default_value = "bin")]
+        install_bin: std::path::PathBuf,
     },
 
     /// Run the given WASI file
