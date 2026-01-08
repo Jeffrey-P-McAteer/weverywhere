@@ -71,10 +71,16 @@ pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface
     }
   }
 
+  let execute_req = crate::messages::ExecuteRequest {
+    message: "Test Stuff AAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBB".into(),
+    misc: 5,
+  };
+  let execute_req_encoded = serde_bare::to_vec(&execute_req)?;
+
   // sock.connect( (*multicast_group, port) ).await.map_err(map_loc_err!())?;
   let mut buf = [0; 1024];
 
-  let len = sock.send_to(b"test 111111 test 222222 test 333333", (*multicast_group, port)).await.map_err(map_loc_err!())?;
+  let len = sock.send_to(&execute_req_encoded, (*multicast_group, port)).await.map_err(map_loc_err!())?;
   tracing::warn!("{:?} bytes sent", len);
 
   let td = tokio::time::Duration::from_millis(100);
