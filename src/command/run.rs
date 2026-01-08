@@ -72,8 +72,8 @@ pub async fn run_one_iface(file_path: &std::path::PathBuf, iface_idx: u32, iface
   }
 
   let execute_req = crate::messages::ExecuteRequest {
-    message: "Test Stuff AAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBB".into(),
-    misc: 5,
+    message: "Test Stuff AAAAAAAAAAAAAAAAAAAAAAABBBBBBBBBBBBBBBBBBBCCC".into(),
+    misc: 12,
   };
   let execute_req_encoded = serde_bare::to_vec(&execute_req)?;
 

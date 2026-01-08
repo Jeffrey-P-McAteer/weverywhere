@@ -85,12 +85,27 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
     let mut buf = [0; 16*1024];
     loop {
         let (len, addr) = sock.recv_from(&mut buf).await.map_err(map_loc_err!())?;
-        tracing::warn!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
+        //tracing::warn!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
+        if crate::v_is_everything() {
+          tracing::warn!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
+        }
+        else if crate::v_is_info() {
+          tracing::warn!("{:?} bytes received from {:?}", len, addr);
+        }
+
+        match serde_bare::from_slice::<crate::messages::ExecuteRequest>(&buf[..len]) {
+          Ok(execute_req) => {
+            tracing::warn!("Got execute req: {:?}", execute_req);
+          }
+          Err(e) => {
+            tracing::warn!("{:?}", e);
+          }
+        }
 
         //sock.connect(addr).await.map_err(map_loc_err!())?;  // forces routing decision on BSD and MacOS machines, which otherwise error during send_to with "Os { code: 49, kind: AddrNotAvailable, message: "Can't assign requested address" }"
 
-        let len = sock.send_to(&buf[..len], addr).await.map_err(map_loc_err!())?;
-        tracing::warn!("{:?} bytes sent", len);
+        // let len = sock.send_to(&buf[..len], addr).await.map_err(map_loc_err!())?;
+        // tracing::warn!("{:?} bytes sent", len);
 
     }
   }
