@@ -41,13 +41,13 @@ pub struct Executor {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProgramData {
   /// Used to determine the Controller / Client of this program, and the trust given to it by Executors / Servers.
-  source: config::IdentityData,
+  pub source: config::IdentityData,
 
   /// This is an untrusted value but is signed all the same; it may be ANY utf-8 set of characters up to 256 bytes long.
-  human_name: String,
+  pub human_name: String,
 
   /// The executable material.
-  wasm_program_bytes: Vec<u8>,
+  pub wasm_program_bytes: Vec<u8>,
 
   /// Holds signature bytes in whatever format is hinted at by source.encoded_public_key_fmt
   /// The following fields are hashed in order: all fields of source, human_name, wasm_program_bytes

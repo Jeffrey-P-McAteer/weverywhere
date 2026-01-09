@@ -20,7 +20,7 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, multicast_gr
     .set_source(&source)
     .build().map_err(map_loc_err!())?;
 
-  let execute_req = messages::ExecuteRequest {
+  let execute_req = messages::NetworkMessage::ExecuteRequest {
     program_data: pd.clone(),
   };
   let execute_req_encoded = serde_bare::to_vec(&execute_req)?;

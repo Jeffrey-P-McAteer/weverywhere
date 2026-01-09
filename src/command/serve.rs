@@ -98,27 +98,34 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
           tracing::warn!("{:?} bytes received from {:?}", len, addr);
         }
 
-        match serde_bare::from_slice::<crate::messages::ExecuteRequest>(&buf[..len]) {
-          Ok(execute_req) => {
-            tracing::warn!("Got execute req: {:?}", execute_req);
-
-            match executor.begin_exec(&execute_req.program_data).await { // TODO async off to a thread pool
-              Ok(running_pid) => {
+        #[allow(unreachable_patterns)]
+        match serde_bare::from_slice::<crate::messages::NetworkMessage>(&buf[..len]) {
+          Ok(network_message) => {
+            match network_message {
+              crate::messages::NetworkMessage::ExecuteRequest { program_data } => {
                 if crate::v_is_info() {
-                  tracing::info!("Spawned PID {}", running_pid);
+                  tracing::warn!("Recieved ExecuteRequest: {:?}", &program_data.human_name );
                 }
-                // TODO stdio stuff here?
-                let exit_code = executor.wait_for_pid_exit(running_pid).await?;
-                if crate::v_is_info() {
-                  tracing::info!("Exited with code {}", exit_code);
+                match executor.begin_exec(&program_data).await { // TODO async off to a thread pool
+                  Ok(running_pid) => {
+                    if crate::v_is_info() {
+                      tracing::info!("Spawned PID {}", running_pid);
+                    }
+                    // TODO stdio stuff here?
+                    let exit_code = executor.wait_for_pid_exit(running_pid).await?;
+                    if crate::v_is_info() {
+                      tracing::info!("Exited with code {}", exit_code);
+                    }
+                  }
+                  Err(e) => {
+                    tracing::info!("e = {:?}", e);
+                  }
                 }
               }
-              Err(e) => {
-                tracing::info!("e = {:?}", e);
+              unused => {
+                tracing::warn!("Got unexpected network message: {:?}", unused);
               }
             }
-
-
           }
           Err(e) => {
             tracing::warn!("{:?}", e);
