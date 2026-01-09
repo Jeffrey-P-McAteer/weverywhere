@@ -113,6 +113,8 @@ impl ProgramDataBuilder {
 pub struct RunningProgram {
   pub data: ProgramData,
 
+  pub program_is_trusted: bool,
+
   pub config: wasmtime::Config,
   pub engine: std::sync::Arc<tokio::sync::RwLock<wasmtime::Engine>>,
   pub store: tokio::sync::RwLock<Option<wasmtime::Store<RPStoreData>>>,
@@ -310,6 +312,7 @@ impl Executor {
     // Construct a Running Program and begin executing it
     let arc_rp_data = std::sync::Arc::new(tokio::sync::RwLock::new(RunningProgram {
       data: program.clone(),
+      program_is_trusted: program_is_trusted,
       config: config,
       engine: std::sync::Arc::new(tokio::sync::RwLock::new(engine)),
       store: tokio::sync::RwLock::new(None),
