@@ -37,7 +37,7 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
       run_local::run_local(file_path, args).await.map_err(map_loc_err!())?;
     }
     Command::Serve { multicast_groups, port } => {
-      serve::serve(multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
+      serve::serve(args, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
     }
   }
 

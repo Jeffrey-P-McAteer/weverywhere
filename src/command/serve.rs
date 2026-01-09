@@ -2,7 +2,11 @@ use super::*;
 
 
 #[allow(unreachable_code)]
-pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> DynResult<()> {
+pub async fn serve(args: &args::Args, multicast_group: args::MulticastAddressVec, port: u16) -> DynResult<()> {
+
+  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!())?;
+  let executor = executor::Executor::new(&local_config).await;
+
   let mut tasks = tokio::task::JoinSet::new();
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_group.iter() {
@@ -15,8 +19,9 @@ pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> Dyn
       let iface_name = iface_name.clone();
       let iface_addrs = iface_addrs.clone();
       let multicast_addr = multicast_addr.clone();
+      let executor = executor.clone();
       tasks.spawn(async move {
-        if let Err(e) = serve_iface(iface_idx, &iface_name, &iface_addrs, &multicast_addr, port).await {
+        if let Err(e) = serve_iface(iface_idx, &iface_name, &iface_addrs, &multicast_addr, port, executor).await {
           if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
             if io_err.kind() == std::io::ErrorKind::AddrInUse {
               return; // Don't bother warning, we see this w/ ipv6 link-local addresses.
@@ -34,7 +39,7 @@ pub async fn serve(multicast_group: args::MulticastAddressVec, port: u16) -> Dyn
 }
 
 #[allow(unreachable_code)]
-pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std::net::IpAddr>, multicast_addr: &std::net::IpAddr, port: u16) -> DynResult<()> {
+pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std::net::IpAddr>, multicast_addr: &std::net::IpAddr, port: u16, executor: std::sync::Arc<executor::Executor>) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
   if crate::v_is_everything() {
@@ -96,6 +101,24 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
         match serde_bare::from_slice::<crate::messages::ExecuteRequest>(&buf[..len]) {
           Ok(execute_req) => {
             tracing::warn!("Got execute req: {:?}", execute_req);
+
+            match executor.begin_exec(&execute_req.program_data).await { // TODO async off to a thread pool
+              Ok(running_pid) => {
+                if crate::v_is_info() {
+                  tracing::info!("Spawned PID {}", running_pid);
+                }
+                // TODO stdio stuff here?
+                let exit_code = executor.wait_for_pid_exit(running_pid).await?;
+                if crate::v_is_info() {
+                  tracing::info!("Exited with code {}", exit_code);
+                }
+              }
+              Err(e) => {
+                tracing::info!("e = {:?}", e);
+              }
+            }
+
+
           }
           Err(e) => {
             tracing::warn!("{:?}", e);
