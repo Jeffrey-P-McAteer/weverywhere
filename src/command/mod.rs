@@ -31,7 +31,7 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
       install_to::install_to(install_root, install_etc, install_bin).await.map_err(map_loc_err!())?;
     }
     Command::Run { file_path, multicast_groups, port } => {
-      run::run(file_path, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
+      run::run(args, file_path, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
     }
     Command::RunLocal { file_path } => {
       run_local::run_local(file_path, args).await.map_err(map_loc_err!())?;
