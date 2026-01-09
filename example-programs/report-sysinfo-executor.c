@@ -8,6 +8,9 @@
 __attribute__((import_module("host"), import_name("print")))
 void host_print(const char* ptr, int len);
 
+__attribute__((import_module("host"), import_name("trusts_me")))
+int host_trusts_me();
+
 __attribute__((export_name("_start")))
 void _start() {
 
@@ -15,5 +18,12 @@ void _start() {
   unsigned int out_len = sizeof(out) - 1;
 
   host_print(out, out_len);
+
+  if (host_trusts_me()) {
+    host_print("We are trusted! ", 16);
+  }
+  else {
+    host_print("We are NOT trusted! ", 19);
+  }
 
 }

@@ -117,7 +117,7 @@ pub struct RunningProgram {
 
   pub config: wasmtime::Config,
   pub engine: std::sync::Arc<tokio::sync::RwLock<wasmtime::Engine>>,
-  pub store: tokio::sync::RwLock<Option<wasmtime::Store<RPStoreData>>>,
+  pub store: std::sync::Arc<tokio::sync::RwLock<Option<wasmtime::Store<RPStoreData>>>>,
   pub module: tokio::sync::RwLock<Option<wasmtime::Module>>,
   pub linker: tokio::sync::RwLock<Option<wasmtime::Linker<RPStoreData>>>,
 
@@ -315,7 +315,7 @@ impl Executor {
       program_is_trusted: program_is_trusted,
       config: config,
       engine: std::sync::Arc::new(tokio::sync::RwLock::new(engine)),
-      store: tokio::sync::RwLock::new(None),
+      store: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
       module: tokio::sync::RwLock::new(None),
       linker: tokio::sync::RwLock::new(None),
       spawn_error: tokio::sync::RwLock::new(None),
@@ -352,7 +352,7 @@ impl Executor {
       // Bind a custom "host" module with a "print" function
       linker.func_wrap(
           "host",
-          "pri  nt",
+          "print",
           |_caller: wasmtime::Caller<'_, RPStoreData>, ptr: i32, len: i32| -> wasmtime::Result<()> {
               tracing::info!("[WASM] Print called with ptr={}, len={}", ptr, len);
               Ok(())
@@ -360,13 +360,25 @@ impl Executor {
       ).map_err(map_loc_err!())?;
 
       // Add another custom function that returns a value
-      linker.func_wrap(
-          "env",
-          "get_magic_number",
-          |_caller: wasmtime::Caller<'_, RPStoreData>| -> wasmtime::Result<i32> {
-              tracing::info!("[HOST] get_magic_number called, returning 42");
-              Ok(42)
-          },
+      linker.func_wrap_async(
+          "host",
+          "trusts_me", // Clients call host::trusts_me() to determine if they are trusted. Catch me at a nomenclature class later.
+          |caller: wasmtime::Caller<'_, RPStoreData>, unk: () | Box::new(async move{
+            let program_is_trusted = {
+              match caller.data().rp.try_read() {
+                Ok(rp_read_lock) => rp_read_lock.program_is_trusted,
+                Err(e) => {
+                  false
+                }
+              }
+            };
+            if program_is_trusted {
+              Ok(1 as i32) // True == 1
+            }
+            else {
+              Ok(0 as i32) // False == 0
+            }
+          }),
       ).map_err(map_loc_err!())?;
 
       *write_lock.linker.write().await = Some(linker);
@@ -384,19 +396,28 @@ impl Executor {
     let running_arc_rp_data = arc_rp_data.clone();
     let runner_t_self_weakref = self.self_weakref.clone();
     tokio::spawn(async move {
-      let write_lock = running_arc_rp_data.write().await;
 
-      let mut linker_lock = write_lock.linker.write().await;
-      let write_lock_module = write_lock.module.read().await;
-      let mut write_lock_store = write_lock.store.write().await;
 
-      let instance_res = linker_lock.as_mut().unwrap().instantiate_async(
-        &mut write_lock_store.as_mut().unwrap(),
-        &write_lock_module.as_ref().unwrap()
-      ).await.map_err(map_loc_err!());
+      let instance_res = {
+        let write_lock = running_arc_rp_data.write().await;
+
+        let mut linker_lock = write_lock.linker.write().await;
+        let write_lock_module = write_lock.module.read().await;
+        let mut write_lock_store = write_lock.store.write().await;
+
+        linker_lock.as_mut().unwrap().instantiate_async(
+          &mut write_lock_store.as_mut().unwrap(),
+          &write_lock_module.as_ref().unwrap()
+        ).await.map_err(map_loc_err!())
+      };
 
       match instance_res {
         Ok(instance) => {
+          let store_rw = {
+            let wg = running_arc_rp_data.write().await;
+            wg.store.clone()
+          };
+          let mut write_lock_store = store_rw.write().await;
           match instance.get_typed_func::<(), ()>(&mut write_lock_store.as_mut().unwrap(), "_start").map_err(map_loc_err!()) {
             Ok(main_func) => {
               match main_func.call_async(&mut write_lock_store.as_mut().unwrap(), ()).await.map_err(map_loc_err!()) {
@@ -417,7 +438,7 @@ impl Executor {
                 Err(e) => {
                   tracing::info!("{}", e);
                   {
-                    *write_lock.spawn_error.write().await = Some(e.into());
+                    *running_arc_rp_data.write().await.spawn_error.write().await = Some(e.into());
                   }
                   if let Some(self_arc) = runner_t_self_weakref.upgrade() {
                     self_arc.running_programs.remove(&this_program_pid);
@@ -430,7 +451,7 @@ impl Executor {
             Err(e) => {
               tracing::info!("{}", e);
               {
-                *write_lock.spawn_error.write().await = Some(e.into());
+                *running_arc_rp_data.write().await.spawn_error.write().await = Some(e.into());
               }
               if let Some(self_arc) = runner_t_self_weakref.upgrade() {
                   self_arc.running_programs.remove(&this_program_pid);
@@ -443,7 +464,7 @@ impl Executor {
         Err(e) => {
           tracing::info!("{}", e);
           {
-            *write_lock.spawn_error.write().await = Some(e.into());
+            *running_arc_rp_data.write().await.spawn_error.write().await = Some(e.into());
           }
           if let Some(self_arc) = runner_t_self_weakref.upgrade() {
             self_arc.running_programs.remove(&this_program_pid);
