@@ -57,6 +57,8 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
 
   if let Ok(sock) = tokio::net::UdpSocket::bind(empty_bind_addr_port).await {
 
+    let sock = std::sync::Arc::new(sock); // Allow us to send socket to many threads - we wrap in UdpSocketSender as recieving is racy from other threads!
+
     if crate::v_is_info() {
       tracing::warn!("Successfully bound to {} - {: <18} address {} port {} (addresses - {:?})", iface_idx, iface_name, multicast_addr, port, iface_addrs);
     }
@@ -106,7 +108,8 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
                 if crate::v_is_info() {
                   tracing::warn!("Recieved ExecuteRequest: {:?}", &program_data.human_name );
                 }
-                match executor.begin_exec(&program_data, Some(addr)).await { // TODO async off to a thread pool
+                let stdio_fwd = executor::wasi_adapters::WasiStdioSimpleForwarder::new_udp(addr, UdpSocketSender::new(&sock) );
+                match executor.begin_exec(&program_data, stdio_fwd).await { // TODO async off to a thread pool
                   Ok(running_pid) => {
                     if crate::v_is_info() {
                       tracing::info!("Spawned PID {}", running_pid);
@@ -158,5 +161,32 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
 }
 
 
+#[derive(Clone)]
+pub struct UdpSocketSender {
+    socket: std::sync::Arc<tokio::net::UdpSocket>,
+}
 
+impl UdpSocketSender {
+  pub fn new(socket: &std::sync::Arc<tokio::net::UdpSocket>) -> UdpSocketSender {
+    UdpSocketSender {
+      socket: socket.clone()
+    }
+  }
+    pub async fn send_to(
+        &self,
+        buf: &[u8],
+        addr: std::net::SocketAddr,
+    ) -> std::io::Result<usize> {
+        self.socket.send_to(buf, addr).await
+    }
+
+    pub fn poll_send_to(
+        &self,
+        cx: &mut core::task::Context<'_>,
+        buf: &[u8],
+        addr: std::net::SocketAddr,
+    ) -> core::task::Poll<std::io::Result<usize>> {
+        self.socket.poll_send_to(cx, buf, addr)
+    }
+}
 

@@ -57,7 +57,7 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, multicast_gr
 pub async fn run_one_iface(ex_req_bytes: &[u8], pd: &executor::ProgramData, iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std::net::IpAddr>, multicast_group: &std::net::IpAddr, port: u16) -> DynResult<()> {
 
   if crate::v_is_info() {
-    tracing::warn!("Sending {} bytes to {:?} port {} on iface {} ({:?})", 999, multicast_group, port, iface_name, iface_addrs);
+    tracing::warn!("Sending {} bytes to {:?} port {} on iface {} ({:?})", ex_req_bytes.len(), multicast_group, port, iface_name, iface_addrs);
   }
 
   let empty_bind_addr_port = if multicast_group.is_ipv4() {

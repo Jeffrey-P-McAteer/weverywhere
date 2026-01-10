@@ -256,7 +256,7 @@ impl Executor {
     self.trusted_keys.insert(name.as_ref().into(), key.clone());
   }
 
-  pub async fn begin_exec(&self, program: &ProgramData, net_source: Option<std::net::SocketAddr>) -> DynResult<u64> {
+  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -275,7 +275,7 @@ impl Executor {
       }
     }
 
-    self.create_pid(program, is_trusted, net_source).await
+    self.create_pid(program, is_trusted, stdio_forwarder).await
   }
 
   fn create_next_pid(&self) -> u64 {
@@ -289,11 +289,13 @@ impl Executor {
     Ok(())
   }
 
-  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, net_source: Option<std::net::SocketAddr>) -> DynResult<u64> {
+  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder) -> DynResult<u64> {
     // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
     let this_program_pid = self.create_next_pid();
 
     self.terminate_running_pid(this_program_pid).await?;
+
+    stdio_forwarder.set_pid(this_program_pid); // Claim this PID - todo look at timeout stuff, we should not allow these to alias new processes
 
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true); // Enable fuel tracking for instruction counting
@@ -322,8 +324,8 @@ impl Executor {
       // NOTE: do NOT call inherit_args() unless you want argv
       // NOTE: do NOT call inherit_env() unless you want env vars
       //.build();
-      .stdout( wasi_adapters::WasiStdioSimpleForwarder::new_maybe_udp(net_source.clone()) )
-      .stderr( wasi_adapters::WasiStdioSimpleForwarder::new_maybe_udp(net_source.clone()) )
+      .stdout( stdio_forwarder.clone() )
+      .stderr( stdio_forwarder.clone() )
       .build_p1();
 
     let rps_store_data = RPStoreData {
