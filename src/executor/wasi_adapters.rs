@@ -12,6 +12,21 @@ pub struct WasiStdioSimpleForwarder {
   our_pid: u64,
   reply_to: Option<std::net::SocketAddr>,
   reply_from: Option<command::serve::UdpSocketSender>,
+
+  // Polled state
+  current_encoded_msg: Option<Vec<u8>>,
+  current_encoded_sent: usize,
+
+}
+
+impl std::fmt::Debug for WasiStdioSimpleForwarder {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.debug_struct("WasiStdioSimpleForwarder")
+          .field("our_pid", &self.our_pid)
+          .field("reply_to", &self.reply_to)
+          // reply_from does not impl Debug
+          .finish()
+  }
 }
 
 
@@ -21,6 +36,8 @@ impl WasiStdioSimpleForwarder {
       our_pid: 0,
       reply_to: None,
       reply_from: None,
+      current_encoded_msg: None,
+      current_encoded_sent: 0
     }
   }
   pub fn new_maybe_udp(reply_to: Option<std::net::SocketAddr>, reply_from: Option<command::serve::UdpSocketSender>) -> WasiStdioSimpleForwarder {
@@ -28,6 +45,8 @@ impl WasiStdioSimpleForwarder {
       our_pid: 0,
       reply_to: reply_to,
       reply_from: reply_from,
+      current_encoded_msg: None,
+      current_encoded_sent: 0
     }
   }
   pub fn new_udp(reply_to: std::net::SocketAddr, reply_from: command::serve::UdpSocketSender) -> WasiStdioSimpleForwarder {
@@ -35,6 +54,8 @@ impl WasiStdioSimpleForwarder {
       our_pid: 0,
       reply_to: Some(reply_to),
       reply_from: Some(reply_from),
+      current_encoded_msg: None,
+      current_encoded_sent: 0
     }
   }
   pub fn set_pid(&mut self, pid: u64) {
@@ -45,26 +66,48 @@ impl WasiStdioSimpleForwarder {
 
 impl tokio::io::AsyncWrite for WasiStdioSimpleForwarder {
   fn poll_write(
-      self: Pin<&mut Self>,
+      mut self: Pin<&mut Self>,
       cx: &mut Context<'_>,
       buf: &[u8],
   ) -> Poll<Result<usize, std::io::Error>> {
     if let (Some(reply_to), Some(reply_from)) = (self.reply_to, self.reply_from.clone()) {
-      // Construct a
-      let msg = messages::NetworkMessage::BasicInsecureProgramStdout {
-        from_pid: self.our_pid,
-        stdout_data: buf.to_vec(),
-      };
-      match serde_bare::to_vec(&msg) {
-        Ok(msg_encoded) => {
-          reply_from.poll_send_to(cx, &msg_encoded, reply_to)
+      if self.current_encoded_msg.is_none() {
+        let msg = messages::NetworkMessage::BasicInsecureProgramStdout {
+          from_pid: self.our_pid,
+          stdout_data: buf.to_vec(),
+        };
+        match serde_bare::to_vec(&msg) {
+          Ok(msg_encoded) => {
+            self.current_encoded_sent = 0;
+            self.current_encoded_msg = Some(msg_encoded);
+          }
+          Err(e) => {
+            tracing::info!("e = {:?}", e);
+            // Lie and say we wrote everything - We will handle encoding errors l8ter
+            return Poll::Ready(Ok(buf.len()));
+          }
         }
-        Err(e) => {
-          tracing::info!("e = {:?}", e);
-          // Lie and say we wrote everything - this time b/c of an encoding error
-          Poll::Ready(Ok(buf.len()))
+        if let Some(frame) = self.current_encoded_msg.clone() { // Todo better memory management!
+          while self.current_encoded_sent < frame.len() {
+            let n = match reply_from.poll_send_to(
+                cx,
+                &frame[self.current_encoded_sent..],
+                reply_to,
+            ) {
+                Poll::Ready(Ok(n)) => n,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            };
+
+            // UDP usually sends whole frames, but never assume
+            self.current_encoded_sent += n;
+          }
         }
       }
+
+      // Either we errored when encoding, or Success, we have sent everything! Clear internal poll state and tell poller we are done.
+      self.current_encoded_msg = None;
+      Poll::Ready(Ok(buf.len()))
     }
     else {
       // Lie and say we wrote everything - None,None becomes a no-op.
