@@ -2,6 +2,8 @@
 use crate::*;
 use crate::args::*;
 
+pub mod wasi_adapters;
+
 /**
  * Stores all data for the Executor.
  **/
@@ -254,7 +256,7 @@ impl Executor {
     self.trusted_keys.insert(name.as_ref().into(), key.clone());
   }
 
-  pub async fn begin_exec(&self, program: &ProgramData) -> DynResult<u64> {
+  pub async fn begin_exec(&self, program: &ProgramData, net_source: Option<std::net::SocketAddr>) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -273,7 +275,7 @@ impl Executor {
       }
     }
 
-    self.create_pid(program, is_trusted).await
+    self.create_pid(program, is_trusted, net_source).await
   }
 
   fn create_next_pid(&self) -> u64 {
@@ -287,7 +289,7 @@ impl Executor {
     Ok(())
   }
 
-  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool) -> DynResult<u64> {
+  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, net_source: Option<std::net::SocketAddr>) -> DynResult<u64> {
     // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
     let this_program_pid = self.create_next_pid();
 

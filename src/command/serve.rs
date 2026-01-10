@@ -106,7 +106,7 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
                 if crate::v_is_info() {
                   tracing::warn!("Recieved ExecuteRequest: {:?}", &program_data.human_name );
                 }
-                match executor.begin_exec(&program_data).await { // TODO async off to a thread pool
+                match executor.begin_exec(&program_data, Some(addr)).await { // TODO async off to a thread pool
                   Ok(running_pid) => {
                     if crate::v_is_info() {
                       tracing::info!("Spawned PID {}", running_pid);
