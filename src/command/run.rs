@@ -98,11 +98,41 @@ pub async fn run_one_iface(ex_req_bytes: &[u8], pd: &executor::ProgramData, ifac
 
   let td = tokio::time::Duration::from_millis(100);
 
-  for _ in 0..24 {
-    // Only wait up to 100ms for a reply;
+  let mut remaining_100ms_checks: usize = 24;
+
+  while remaining_100ms_checks > 0 {
+    remaining_100ms_checks -= 1;
+    // Only wait up to 100ms for replies;
     match tokio::time::timeout(td, sock.recv(&mut buf)).await {
       Ok(Ok(len)) => {
-        tracing::warn!("{:?} bytes received from {:?} => {:?}", len, multicast_group, &buf[0..len]);
+        if crate::v_is_everything() {
+          tracing::warn!("{:?} bytes received from {:?} => {:?}", len, multicast_group, &buf[0..len]);
+        }
+        #[allow(unreachable_patterns)]
+        match serde_bare::from_slice::<messages::NetworkMessage>(&buf[..len]) {
+          Ok(network_message) => {
+            remaining_100ms_checks += 10; // if we rx a message, allow another second of waiting.
+            match network_message {
+              messages::NetworkMessage::BasicInsecureProgramStdout { from_pid, stdout_data } => {
+                if let Ok(stdout_string) = str::from_utf8(&stdout_data) {
+                  tracing::warn!("[{}] {}", from_pid, stdout_string);
+                }
+                else {
+                  tracing::warn!("[{}:binary] {:?}", from_pid, stdout_data);
+                }
+              }
+              messages::NetworkMessage::BasicInsecureProgramExit { from_pid, exit_code } => {
+                tracing::warn!("pid {} exited with code {}", from_pid, exit_code);
+              }
+              unused => {
+                tracing::warn!("Got unexpected network message: {:?}", unused);
+              }
+            }
+          }
+          Err(e) => {
+            tracing::warn!("Parsing NetworkMessage error: {e}");
+          }
+        }
       }
       Ok(Err(e)) => {
         // The socket operation itself failed

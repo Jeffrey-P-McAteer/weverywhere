@@ -99,10 +99,10 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
         }
 
         #[allow(unreachable_patterns)]
-        match serde_bare::from_slice::<crate::messages::NetworkMessage>(&buf[..len]) {
+        match serde_bare::from_slice::<messages::NetworkMessage>(&buf[..len]) {
           Ok(network_message) => {
             match network_message {
-              crate::messages::NetworkMessage::ExecuteRequest { program_data } => {
+              messages::NetworkMessage::ExecuteRequest { program_data } => {
                 if crate::v_is_info() {
                   tracing::warn!("Recieved ExecuteRequest: {:?}", &program_data.human_name );
                 }
@@ -116,6 +116,20 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
                     if crate::v_is_info() {
                       tracing::info!("Exited with code {}", exit_code);
                     }
+                    let program_exit_msg = messages::NetworkMessage::BasicInsecureProgramExit {
+                      from_pid: running_pid,
+                      exit_code: exit_code,
+                    };
+                    match serde_bare::to_vec(&program_exit_msg) {
+                      Ok(program_exit_msg_encoded) => {
+                        let len = sock.send_to(&program_exit_msg_encoded, addr).await.map_err(map_loc_err!())?;
+                        tracing::warn!("{:?} bytes sent to {:?}", len, addr);
+                      }
+                      Err(e) => {
+                        tracing::info!("e = {:?}", e);
+                      }
+                    }
+
                   }
                   Err(e) => {
                     tracing::info!("e = {:?}", e);
