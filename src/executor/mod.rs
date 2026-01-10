@@ -322,7 +322,8 @@ impl Executor {
       // NOTE: do NOT call inherit_args() unless you want argv
       // NOTE: do NOT call inherit_env() unless you want env vars
       //.build();
-      //.stdout(std::unimplemented!())
+      .stdout( wasi_adapters::WasiStdioSimpleForwarder::new_maybe_udp(net_source.clone()) )
+      .stderr( wasi_adapters::WasiStdioSimpleForwarder::new_maybe_udp(net_source.clone()) )
       .build_p1();
 
     let rps_store_data = RPStoreData {
