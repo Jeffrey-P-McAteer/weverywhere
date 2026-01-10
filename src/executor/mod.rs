@@ -113,6 +113,7 @@ impl ProgramDataBuilder {
 pub struct RunningProgram {
   pub data: ProgramData,
 
+  pub pid: u64,
   pub program_is_trusted: bool,
 
   pub config: wasmtime::Config,
@@ -298,20 +299,10 @@ impl Executor {
 
     let engine = wasmtime::Engine::new(&config).map_err(map_loc_err!())?;
 
-    let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
-      .inherit_stdout()   // allow fd_write to stdout
-      .inherit_stderr()   // allow fd_write to stderr
-      // NOTE: do NOT call inherit_stdin()
-      // NOTE: do NOT call preopen_dir()
-      // NOTE: do NOT call inherit_args() unless you want argv
-      // NOTE: do NOT call inherit_env() unless you want env vars
-      //.build();
-      .build_p1();
-
-
     // Construct a Running Program and begin executing it
     let arc_rp_data = std::sync::Arc::new(tokio::sync::RwLock::new(RunningProgram {
       data: program.clone(),
+      pid: this_program_pid,
       program_is_trusted: program_is_trusted,
       config: config,
       engine: std::sync::Arc::new(tokio::sync::RwLock::new(engine)),
@@ -320,6 +311,17 @@ impl Executor {
       linker: tokio::sync::RwLock::new(None),
       spawn_error: tokio::sync::RwLock::new(None),
     }));
+
+    let wasi_ctx = wasmtime_wasi::WasiCtxBuilder::new()
+      //.inherit_stdout()   // allow fd_write to stdout
+      //.inherit_stderr()   // allow fd_write to stderr
+      // NOTE: do NOT call inherit_stdin()
+      // NOTE: do NOT call preopen_dir()
+      // NOTE: do NOT call inherit_args() unless you want argv
+      // NOTE: do NOT call inherit_env() unless you want env vars
+      //.build();
+      //.stdout(std::unimplemented!())
+      .build_p1();
 
     let rps_store_data = RPStoreData {
       rp: arc_rp_data.clone(),
