@@ -1,4 +1,6 @@
 
+use tokio::io::AsyncWriteExt;
+
 use crate::*;
 use crate::args::*;
 
@@ -355,14 +357,54 @@ impl Executor {
       wasmtime_wasi::p1::add_to_linker_async::<RPStoreData>(&mut linker, |linker_store_data| {
           &mut linker_store_data.wasi_p1_ctx
       }).map_err(map_loc_err!())?;
-
       // Bind a custom "host" module with a "print" function
-      linker.func_wrap(
+      let host_print_stdio_forwarder_ref= stdio_forwarder.clone();
+      linker.func_wrap_async(
           "host",
           "print",
-          |_caller: wasmtime::Caller<'_, RPStoreData>, ptr: i32, len: i32| -> wasmtime::Result<()> {
-              tracing::info!("[WASM] Print called with ptr={}, len={}", ptr, len);
-              Ok(())
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, len) : (i32, i32) | {
+            let mut owned_host_print_stdio_forwarder = host_print_stdio_forwarder_ref.clone();
+              Box::new(async move {
+
+                let our_pid = {
+                  match caller.data().rp.try_read() {
+                    Ok(rp_read_lock) => rp_read_lock.pid,
+                    Err(e) => {
+                      0
+                    }
+                  }
+                };
+
+                let memory = match caller.get_export("memory") {
+                    Some(wasmtime::Extern::Memory(mem)) => mem,
+                    _ => return Err(wasmtime::Trap::MemoryOutOfBounds.into()),
+                };
+
+                let data = memory
+                    .data(&caller)
+                    .get(ptr as usize..(ptr as usize + len as usize))
+                    .ok_or_else(|| wasmtime::Trap::MemoryOutOfBounds)?;
+
+                if let Err(e) = owned_host_print_stdio_forwarder.write_all(data).await {
+                  tracing::info!("{}:{} {:?}", file!(), line!(), e);
+                }
+
+                // let msg = messages::NetworkMessage::BasicInsecureProgramStdout {
+                //   from_pid: our_pid,
+                //   stdout_data: data.to_vec(),
+                // };
+                // match serde_bare::to_vec(&msg) {
+                //   Ok(msg_encoded) => {
+                //     // Now send to client!
+
+                //   }
+                //   Err(e) => {
+                //     tracing::info!("{}:{} {:?}", file!(), line!(), e);
+                //   }
+                // }
+
+                Ok(())
+            })
           },
       ).map_err(map_loc_err!())?;
 

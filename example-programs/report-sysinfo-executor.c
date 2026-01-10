@@ -15,7 +15,7 @@ __attribute__((export_name("_start")))
 void _start() {
 
   const char* out = "Hello World";
-  unsigned int out_len = sizeof(out) - 1;
+  unsigned int out_len = 12;
 
   host_print(out, out_len);
 
