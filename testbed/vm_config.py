@@ -42,3 +42,44 @@ VMS = [
     },
 ]
 
+
+# ---------------------------------------------------------------------------
+# Global testbed settings. Changing anything a VM depends on (its entry above,
+# the disk size, the host bridge, or the image it is built from) changes that
+# VM's build manifest hash, so create-test-vm-images.py rebuilds it to match.
+# ---------------------------------------------------------------------------
+
+# The host's own address on the shared VM bridge. Every VM's static-ip above
+# lives in this network and reaches the host (and is reached from the host for
+# SSH) at this address. Must NOT collide with any VM static-ip.
+HOST_BRIDGE_CIDR = '10.0.255.254/16'
+
+# Linux interface names are capped at 15 chars; these stay well under.
+BRIDGE_NAME = 'brweve'          # host bridge all VM taps attach to
+TAP_PREFIX  = 'tapweve'         # per-VM tap devices: tapweve0, tapweve1, ...
+
+# Size of each VM's system disk (thin-provisioned in the qcow2).
+DISK_SIZE_GB = 40
+
+# Console/login password for the created user. SSH itself uses the generated
+# key pair (testbed/vms/<hostname>/id_ed25519); this is only for the local
+# console / sudo, and to let you log in if you ever open the VM window.
+LOGIN_PASSWORD = 'weverywhere'
+
+# Base images the VMs are built from. Linux uses ready-made cloud qcow2 images
+# provisioned by cloud-init; Windows is installed from an ISO you provide (see
+# WINDOWS_ISO_NAME) because Microsoft does not publish a redistributable image.
+IMAGE_SOURCES = {
+    'fedora': 'https://download.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2',
+    'ubuntu': 'https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img',
+}
+
+# Windows installation ISO. Place the file at testbed/cache/<WINDOWS_ISO_NAME>.
+# create-test-vm-images.py prints download instructions and waits if it is
+# missing (Microsoft requires an interactive download / license acceptance).
+WINDOWS_ISO_NAME = 'windows-x64.iso'
+
+# Win32-OpenSSH release bundled onto the Windows config ISO so the guest gets an
+# SSH server without needing internet during install. Downloaded to testbed/cache/.
+WIN_OPENSSH_URL = 'https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.8.1.0p1-Preview/OpenSSH-Win64.zip'
+

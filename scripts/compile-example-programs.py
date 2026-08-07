@@ -12,7 +12,7 @@ import shutil
 import traceback
 import shlex
 
-REPO_DIR = os.path.dirname(__file__)
+REPO_DIR = os.path.dirname(os.path.dirname(__file__))
 
 def check_req_bins():
   req_bins = [
@@ -66,13 +66,13 @@ def compile_example_program(example_path, out_dir):
 
 
 def main():
-  example_programs = os.path.join(REPO_DIR, 'example-programs')
-  example_programs_out = os.path.join(REPO_DIR, 'target', 'example-programs')
+  example_programs = os.path.abspath(os.path.join(REPO_DIR, 'example-programs'))
+  example_programs_out = os.path.abspath(os.path.join(REPO_DIR, 'target', 'example-programs'))
 
   os.makedirs(example_programs_out, exist_ok=True)
 
   for program_name in os.listdir(example_programs):
-    program_path = os.path.join(example_programs, program_name)
+    program_path = os.path.abspath(os.path.join(example_programs, program_name))
     compile_example_program(program_path, example_programs_out)
 
   print(f'Done! Outputs are in {os.path.relpath(example_programs_out, REPO_DIR)}')

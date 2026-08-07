@@ -1,3 +1,4 @@
+#!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
@@ -27,7 +28,9 @@ from _version import resolve_version
 
 BUILD_TIMESTAMP = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
-r = git.Repo('.')
+REPO_DIR = os.path.dirname(os.path.dirname(__file__))
+
+r = git.Repo(REPO_DIR)
 h = r.head.commit.hexsha[:7]
 dirty = r.is_dirty()
 if dirty:
@@ -373,7 +376,7 @@ def push_to_pages_branch(temp_dir):
     print("SUCCESS: Pages branch published")
     return True
 
-git_repo = os.path.dirname(__file__)
+git_repo = os.path.dirname(os.path.dirname(__file__))
 os.chdir(git_repo)
 
 last_commit_sha, last_commit_msg = get_last_commit_sha_message(git_repo)
