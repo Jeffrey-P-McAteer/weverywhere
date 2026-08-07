@@ -389,11 +389,14 @@ def build_windows_config(vm: dict, dest: Path) -> Path:
     iface = static_ip(vm)
 
     autounattend = _windows_autounattend_xml(vm)
-    provision = _windows_provision_cmd(vm, iface, pubkey)
+    # Batch files get CRLF line endings so cmd.exe parses them reliably.
+    provision = _windows_provision_cmd(vm, iface, pubkey).replace("\n", "\r\n")
+    stage = _windows_stage_cmd().replace("\n", "\r\n")
 
     iso = pycdlib.PyCdlib()
     iso.new(interchange_level=3, joliet=3, rock_ridge="1.09", vol_ident="WEVECFG")
     _iso_add(iso, autounattend.encode("utf-8"), "autounattend.xml")
+    _iso_add(iso, stage.encode("utf-8"), "stage.cmd")
     _iso_add(iso, provision.encode("utf-8"), "provision.cmd")
     _iso_add(iso, binary.read_bytes(), "wevebinary.exe")
     _iso_add(iso, openssh_zip.read_bytes(), "OpenSSH-Win64.zip")
@@ -406,11 +409,16 @@ def build_windows_config(vm: dict, dest: Path) -> Path:
 def _windows_autounattend_xml(vm: dict) -> str:
     """
     A best-effort unattended-install answer file for Windows 10/11 x64 (BIOS/MBR,
-    single partition). Creates the local admin user and runs provision.cmd from
-    the config CD at first logon, which installs OpenSSH, the static IP, the boot
-    task, then shuts down so the build can detect completion.
+    single partition). Creates the local admin user, and in the specialize pass
+    stages provision.cmd as SetupComplete.cmd (via stage.cmd on the config CD).
+    Windows runs SetupComplete.cmd as SYSTEM at the end of install to set up
+    OpenSSH + the static IP + the boot task and then power off - which is what
+    lets the build detect completion. (We deliberately do NOT use
+    FirstLogonCommands: SkipUserOOBE silently suppresses it, which is why an
+    earlier version reached the desktop without ever provisioning or shutting
+    down.)
 
-    NOTE: the <InstallFrom> image name may need tweaking for your specific ISO
+    NOTE: the <InstallFrom> image index may need tweaking for your specific ISO
     edition (run `dism /Get-WimInfo` on the ISO's sources/install.wim). This is
     the piece most likely to need adjustment per Windows image.
     """
@@ -476,6 +484,24 @@ def _windows_autounattend_xml(vm: dict) -> str:
       </UserData>
     </component>
   </settings>
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64"
+      publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <!-- Copy the config CD to C:\\weverywhere-setup and install our
+             SetupComplete.cmd. Windows Setup runs SetupComplete.cmd (as SYSTEM)
+             at the very end of installation REGARDLESS of OOBE/skip settings -
+             unlike FirstLogonCommands, which SkipUserOOBE silently suppresses.
+             That is what actually provisions SSH + the boot task and shuts the
+             VM down, so the build can detect completion. stage.cmd only stages
+             files here; the provisioning itself happens in SetupComplete.cmd. -->
+        <RunSynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+          <Order>1</Order>
+          <Path>cmd /c for %d in (D E F G H I J K L) do @if exist %d:\\stage.cmd call %d:\\stage.cmd</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"
       publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -497,28 +523,37 @@ def _windows_autounattend_xml(vm: dict) -> str:
           </LocalAccount>
         </LocalAccounts>
       </UserAccounts>
-      <AutoLogon>
-        <Enabled>true</Enabled><LogonCount>1</LogonCount><Username>{user}</Username>
-        <Password><Value>{pw}</Value><PlainText>true</PlainText></Password>
-      </AutoLogon>
-      <FirstLogonCommands>
-        <SynchronousCommand wcm:action="add" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
-          <Order>1</Order>
-          <CommandLine>cmd /c for %i in (D E F G H) do @if exist %i:\\provision.cmd call %i:\\provision.cmd</CommandLine>
-          <Description>weverywhere provisioning</Description>
-        </SynchronousCommand>
-      </FirstLogonCommands>
     </component>
   </settings>
 </unattend>
 """
 
 
+def _windows_stage_cmd() -> str:
+    """
+    Runs in the specialize pass off the config CD (%~d0 = that CD). Copies the
+    CD to C:\\weverywhere-setup and installs provision.cmd as the SetupComplete
+    hook Windows runs at the end of install. Kept tiny and CD-relative; the real
+    work is in SetupComplete.cmd, which runs from the C: copies.
+    """
+    return (
+        "@echo off\n"
+        "set CD=%~d0\n"
+        "md C:\\weverywhere-setup 2>nul\n"
+        "xcopy /y /h /e /i \"%CD%\\*.*\" C:\\weverywhere-setup\\\n"
+        "md C:\\Windows\\Setup\\Scripts 2>nul\n"
+        "copy /y \"%CD%\\provision.cmd\" C:\\Windows\\Setup\\Scripts\\SetupComplete.cmd\n"
+    )
+
+
 def _windows_provision_cmd(vm, iface, pubkey: str) -> str:
     """
-    Runs once at first logon from the config CD. Installs OpenSSH from the
-    bundled zip, drops our public key, sets the hard-coded static IP, installs
-    the weverywhere boot task, then shuts down so the installer run completes.
+    Installed as C:\\Windows\\Setup\\Scripts\\SetupComplete.cmd (see stage.cmd),
+    which Windows Setup runs as SYSTEM at the very end of installation. Installs
+    OpenSSH from the bundled zip, drops our public key, sets the hard-coded
+    static IP, registers the weverywhere boot task, then shuts the VM down so the
+    build detects completion. Idempotent and logged to
+    C:\\weverywhere-setup\\provision.log for post-mortems.
     """
     guest_path = bootup_binary_path(vm)
     guest_dir = guest_path.rsplit("\\", 1)[0]
@@ -526,35 +561,38 @@ def _windows_provision_cmd(vm, iface, pubkey: str) -> str:
     mask = str(iface.network.netmask)
     gw = host_gateway_ip()
     return f"""@echo off
-setlocal
-rem --- locate this CD (the drive that holds provision.cmd) ---
-set CD=%~d0
+set SRC=C:\\weverywhere-setup
+set LOG=%SRC%\\provision.log
+echo [provision] start %DATE% %TIME%>>"%LOG%" 2>&1
 
-rem --- copy the weverywhere binary into place ---
-mkdir "{guest_dir}" 2>nul
-copy /y "%CD%\\wevebinary.exe" "{guest_path}"
+rem --- weverywhere binary into place ---
+md "{guest_dir}" 2>nul
+copy /y "%SRC%\\wevebinary.exe" "{guest_path}">>"%LOG%" 2>&1
 
-rem --- install OpenSSH server from the bundled zip ---
+rem --- OpenSSH server from the bundled zip (idempotent) ---
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "Expand-Archive -Force '%CD%\\OpenSSH-Win64.zip' 'C:\\Program Files'; ^
-   & 'C:\\Program Files\\OpenSSH-Win64\\install-sshd.ps1'; ^
-   Set-Service sshd -StartupType Automatic; Start-Service sshd; ^
-   New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22"
+  "$ErrorActionPreference='Continue';" ^
+  "if (-not (Test-Path 'C:\\Program Files\\OpenSSH-Win64\\sshd.exe')) {{ Expand-Archive -Force '%SRC%\\OpenSSH-Win64.zip' 'C:\\Program Files' }};" ^
+  "if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {{ & 'C:\\Program Files\\OpenSSH-Win64\\install-sshd.ps1' }};" ^
+  "Set-Service sshd -StartupType Automatic;" ^
+  "Start-Service sshd;" ^
+  "if (-not (Get-NetFirewallRule -Name sshd -ErrorAction SilentlyContinue)) {{ New-NetFirewallRule -Name sshd -DisplayName 'OpenSSH Server' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 }}">>"%LOG%" 2>&1
 
-rem --- authorized_keys for the admin account ---
-mkdir "C:\\ProgramData\\ssh" 2>nul
-echo {pubkey}> "C:\\ProgramData\\ssh\\administrators_authorized_keys"
-icacls "C:\\ProgramData\\ssh\\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F"
+rem --- authorized_keys for the admin account (strict ACL required by sshd) ---
+md "C:\\ProgramData\\ssh" 2>nul
+echo {pubkey}>"C:\\ProgramData\\ssh\\administrators_authorized_keys"
+icacls "C:\\ProgramData\\ssh\\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F">>"%LOG%" 2>&1
 
-rem --- hard-coded static IP on the first adapter ---
-for /f "tokens=*" %%N in ('powershell -NoProfile -Command "(Get-NetAdapter | Sort-Object ifIndex | Select-Object -First 1).Name"') do set NIC=%%N
-netsh interface ip set address name="%NIC%" static {ip} {mask} {gw}
+rem --- hard-coded static IP on the first physical adapter ---
+for /f "tokens=*" %%N in ('powershell -NoProfile -Command "(Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -First 1).Name"') do set NIC=%%N
+netsh interface ip set address name="%NIC%" static {ip} {mask} {gw}>>"%LOG%" 2>&1
 
 rem --- run the weverywhere binary at every boot ---
-schtasks /create /tn weverywhere-test /tr "\"{guest_path}\"" /sc onstart /ru SYSTEM /f
+schtasks /create /tn weverywhere-test /tr "\"{guest_path}\"" /sc onstart /ru SYSTEM /rl HIGHEST /f>>"%LOG%" 2>&1
 
-rem --- signal completion by powering off ---
-shutdown /s /t 5 /c "weverywhere provisioning complete"
+echo [provision] done %DATE% %TIME%>>"%LOG%" 2>&1
+rem --- power off so create-test-vm-images.py sees the install finish ---
+shutdown /s /t 10 /c "weverywhere provisioning complete"
 """
 
 
