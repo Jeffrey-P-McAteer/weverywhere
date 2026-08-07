@@ -49,6 +49,7 @@ def _print_access_banner(vms: list[dict]) -> None:
         print(f"  {vm['hostname']:<14} {vm['os']:<8} {ip}")
         print(f"       ssh -i {key.relative_to(c.REPO_ROOT)} "
               f"{vm['username']}@{ip}")
+        print(f"       or: uv run testbed/vm-shell.py {vm['hostname']} [command]")
     print()
     print(" Press Ctrl-C to shut the VMs down and remove all network interfaces.")
     print("=" * 72)
