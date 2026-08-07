@@ -5,6 +5,7 @@ use crate::args::*;
 pub mod info;
 pub mod configuration;
 pub mod install_to;
+pub mod daemon;
 pub mod run;
 pub mod run_local;
 pub mod serve;
@@ -30,14 +31,17 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
     Command::InstallTo { install_root, install_etc, install_bin } => {
       install_to::install_to(install_root, install_etc, install_bin).await.map_err(map_loc_err!())?;
     }
-    Command::Run { file_path, multicast_groups, port } => {
-      run::run(args, file_path, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
+    Command::Run { file_path, fabric, multicast_groups, port } => {
+      run::run(args, file_path, *fabric, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
     }
     Command::RunLocal { file_path } => {
       run_local::run_local(file_path, args).await.map_err(map_loc_err!())?;
     }
     Command::Serve { multicast_groups, port } => {
       serve::serve(args, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
+    }
+    Command::Daemon { action } => {
+      daemon::daemon(action, args).await.map_err(map_loc_err!())?;
     }
   }
 

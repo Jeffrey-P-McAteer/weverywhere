@@ -58,16 +58,21 @@ pub enum Command {
         install_bin: std::path::PathBuf,
     },
 
-    /// Run the given WASI file
+    /// Run the given WASI file. By default this talks to the local daemon on this machine;
+    /// pass --fabric to instead broadcast the request to the multicast fabric (the LAN).
     Run {
         /// Path to the WASI file
         file_path: std::path::PathBuf,
 
-        /// UDP Multicast addresses to send to
+        /// Broadcast to the whole multicast fabric instead of only the local daemon
+        #[arg(short, long, default_value_t = false)]
+        fabric: bool,
+
+        /// UDP Multicast addresses to send to (only used with --fabric)
         #[arg(short, long, default_value_t = default_multicast_groups() )]
         multicast_groups: MulticastAddressVec,
 
-        /// UDP Multicast address to send to
+        /// UDP port the daemon listens on
         #[arg(short, long, default_value_t = 2240)]
         port: u16,
     },
@@ -89,8 +94,32 @@ pub enum Command {
         #[arg(short, long, default_value_t = 2240)]
         port: u16,
 
+    },
+
+    /// Manage weverywhere as a long-running background daemon (OS service) that runs `serve`.
+    /// Uses the native service manager on each platform: systemd on Linux, launchd on macOS,
+    /// and the Task Scheduler on Windows. Most actions must run as root / Administrator.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
     }
 
+}
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum DaemonAction {
+    /// Register weverywhere as a boot-time daemon and start it now
+    Install,
+    /// Stop the daemon and remove its service registration
+    Uninstall,
+    /// Start the daemon now
+    Start,
+    /// Stop the daemon now
+    Stop,
+    /// Restart the daemon now
+    Restart,
+    /// Print whether the daemon is installed and running
+    Status,
 }
 
 fn default_multicast_groups() -> MulticastAddressVec {

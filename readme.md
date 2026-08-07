@@ -62,6 +62,48 @@ This is a single rust binary.
 
 The build version is `YYYY.MM.<hours>` where `<hours>` is the whole hours elapsed since the start of the current month (UTC). It is derived purely from the clock — there is no `version.txt` and no hard-coded version string. `scripts/_version.py` is the single source of truth; `build.rs` bakes the same value into the binary (visible via `weverywhere --version`) via the `WEVERYWHERE_VERSION` environment variable so the git tag, the GitHub asset names, and the compiled-in version can never drift.
 
+# Installing and running as a daemon
+
+`weverywhere` can install and manage itself as a background daemon on Linux, macOS, and Windows.
+
+1. Stage the binary and config templates onto a machine with `install-to`, which extracts the
+   embedded `etc/` templates and copies the running binary into `<root>/bin`:
+
+   ```bash
+   weverywhere install-to /usr/local                       # linux/macos -> /usr/local/{bin,etc}
+   weverywhere install-to "C:\Program Files\weverywhere"    # windows
+   ```
+
+   Override the sub-paths with `--install-etc` / `--install-bin` if needed.
+
+2. Register and start the daemon (it runs `weverywhere serve` at boot). Run as root / Administrator:
+
+   ```bash
+   sudo /usr/local/bin/weverywhere daemon install
+   ```
+
+   The backend is systemd on Linux, launchd on macOS, and the Task Scheduler on Windows, but the
+   lifecycle verbs are identical everywhere:
+
+   ```bash
+   weverywhere daemon status | start | stop | restart | uninstall
+   ```
+
+# Client mode
+
+By default the client talks to the **local daemon** on this machine (a loopback unicast, so it works
+on every platform without multicast on the LAN):
+
+```bash
+weverywhere run ./program.wasi
+```
+
+Pass `--fabric` to instead broadcast the request to the multicast fabric (the whole LAN):
+
+```bash
+weverywhere run --fabric ./program.wasi
+```
+
 # Project-level Missing Pieces and TODOs
 
  - [ ] Binary signing

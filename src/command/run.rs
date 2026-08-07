@@ -2,7 +2,7 @@
 use super::*;
 
 
-pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, multicast_groups: args::MulticastAddressVec, port: u16) -> DynResult<()> {
+pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool, multicast_groups: args::MulticastAddressVec, port: u16) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
   // Step 1: Read the executable material & form an exeute request object, sign it, and transmit.
@@ -25,7 +25,14 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, multicast_gr
   };
   let execute_req_encoded = serde_bare::to_vec(&execute_req)?;
 
-  // Step 2: Transmit to all multicast groups on all interfaces
+  // Step 2a (default): talk to the local daemon on this machine. The daemon binds 0.0.0.0:port,
+  // so a unicast to the loopback address reaches it without touching the LAN. This is the
+  // client's default on every platform; --fabric opts into the multicast broadcast below.
+  if !fabric {
+    return send_to_local_daemon(&execute_req_encoded, port).await;
+  }
+
+  // Step 2b (--fabric): transmit to all multicast groups on all interfaces
   let mut tasks = tokio::task::JoinSet::new();
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_groups.iter() {
@@ -145,5 +152,59 @@ pub async fn run_one_iface(ex_req_bytes: &[u8], pd: &executor::ProgramData, ifac
     }
   }
 
+  Ok(())
+}
+
+/// Default client path: send an encoded execute request to the local daemon over loopback, then
+/// print replies for a short window. The daemon binds 0.0.0.0:port, so a unicast to 127.0.0.1
+/// reaches it on every platform without going out to the LAN.
+pub async fn send_to_local_daemon(ex_req_bytes: &[u8], port: u16) -> DynResult<()> {
+  let sock = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await.map_err(map_loc_err!())?;
+  let len = sock.send_to(ex_req_bytes, (std::net::Ipv4Addr::LOCALHOST, port)).await.map_err(map_loc_err!())?;
+  tracing::warn!("{} bytes sent to local daemon 127.0.0.1:{}", len, port);
+  read_daemon_replies(&sock).await
+}
+
+/// Read and print daemon replies (forwarded stdout + exit codes) for up to a short window.
+async fn read_daemon_replies(sock: &tokio::net::UdpSocket) -> DynResult<()> {
+  let td = tokio::time::Duration::from_millis(100);
+  let mut buf = [0u8; 16 * 1024];
+  let mut remaining_100ms_checks: usize = 24;
+  while remaining_100ms_checks > 0 {
+    remaining_100ms_checks -= 1;
+    match tokio::time::timeout(td, sock.recv(&mut buf)).await {
+      Ok(Ok(len)) => {
+        #[allow(unreachable_patterns)]
+        match serde_bare::from_slice::<messages::NetworkMessage>(&buf[..len]) {
+          Ok(network_message) => {
+            remaining_100ms_checks += 10; // got a reply: allow another ~second of waiting
+            match network_message {
+              messages::NetworkMessage::BasicInsecureProgramStdout { from_pid, stdout_data } => {
+                if let Ok(stdout_string) = str::from_utf8(&stdout_data) {
+                  tracing::warn!("[{}] {}", from_pid, stdout_string);
+                }
+                else {
+                  tracing::warn!("[{}:binary] {:?}", from_pid, stdout_data);
+                }
+              }
+              messages::NetworkMessage::BasicInsecureProgramExit { from_pid, exit_code } => {
+                tracing::warn!("pid {} exited with code {}", from_pid, exit_code);
+              }
+              unused => {
+                tracing::warn!("Got unexpected network message: {:?}", unused);
+              }
+            }
+          }
+          Err(e) => {
+            tracing::warn!("Parsing NetworkMessage error: {e}");
+          }
+        }
+      }
+      Ok(Err(e)) => {
+        tracing::warn!("Socket error: {e}");
+      }
+      Err(_) => { /* 100ms timeout, no data */ }
+    }
+  }
   Ok(())
 }
