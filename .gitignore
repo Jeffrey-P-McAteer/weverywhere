@@ -1,4 +1,7 @@
-
+/.claude
+/bin
+/build
+/out
 
 # Added by cargo
 
