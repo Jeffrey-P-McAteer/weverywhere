@@ -52,9 +52,15 @@ This is a single rust binary.
 
  - Source code lives under `./src/*`
  - Example server configuration lies under `./etc/*` and is embedded into the binary; sample config may be extracted to your system with a sub-command (see `weverywhere --help` for details).
- - Example WASMI programs are under `./example-programs/` and may be compiled with `uv run compile-example-programs.py` into `./target/example-programs/<NAME>.wasi`
- - `update-github-pages.py` does what it says on the tin, and is currently a big mess copied from another project.
- - `zig-build-all-targets.py` may be used to cross-compile the rust code on a Linux x86_64 host to all platforms (Mac/Windows/Linux x86_64 and ARM64)
+ - Build and packaging scripts live under `./scripts/*` and are self-contained `uv run` scripts.
+ - Example WASMI programs are under `./example-programs/` and may be compiled with `uv run scripts/compile-example-programs.py` into `./target/example-programs/<NAME>.wasi`
+ - `scripts/update-github-pages.py` does what it says on the tin, and is currently a big mess copied from another project.
+ - `scripts/build.py` cross-compiles the rust code on a Linux x86_64 host to all six release targets (linux/windows/macos x64 and arm64) and stages the artifacts under `./dist/`.
+ - `scripts/publish.py` builds (via `scripts/build.py`) and publishes a versioned GitHub release with all six platform artifacts attached. Run `uv run scripts/publish.py --init-creds` once to set up a token.
+
+## Versioning
+
+The build version is `YYYY.MM.<hours>` where `<hours>` is the whole hours elapsed since the start of the current month (UTC). It is derived purely from the clock — there is no `version.txt` and no hard-coded version string. `scripts/_version.py` is the single source of truth; `build.rs` bakes the same value into the binary (visible via `weverywhere --version`) via the `WEVERYWHERE_VERSION` environment variable so the git tag, the GitHub asset names, and the compiled-in version can never drift.
 
 # Project-level Missing Pieces and TODOs
 

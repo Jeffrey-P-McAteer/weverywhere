@@ -8,7 +8,8 @@ use std::str::FromStr;
 #[derive(Debug, clap::Parser)]
 #[command(
     name = "weverywhere",
-    version = "1.0",
+    // Baked in by build.rs (YYYY.MM.<hours-into-month, UTC>); see scripts/_version.py.
+    version = env!("WEVERYWHERE_VERSION"),
     about = "A WASI program management tool supporting the execution of WASI binaries everywhere."
 )]
 pub struct Args {

@@ -23,6 +23,8 @@ import textwrap
 
 import git
 
+from _version import resolve_version
+
 BUILD_TIMESTAMP = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
 r = git.Repo('.')
@@ -381,11 +383,11 @@ git_remote_origin_url = subprocess.check_output(['git', 'remote', 'get-url', 'or
 open_preview = any('preview' in arg for arg in sys.argv)
 noninteractive = any('noninteractive' in arg for arg in sys.argv)
 
-version = '0.0.0'
-if os.path.exists(os.path.join(git_repo, 'Cargo.toml')):
-  with open(os.path.join(git_repo, 'Cargo.toml'), 'rb') as fd:
-      data = tomllib.load(fd)
-      version = data["package"]["version"]
+# Single source of truth for the version (YYYY.MM.<hours-into-month>, UTC) -
+# the same value build.rs bakes into the binary via WEVERYWHERE_VERSION, so the
+# website and the downloadable binaries always report an identical version.
+# See scripts/_version.py.
+version = resolve_version()
 
 # Printed above download links in monospace
 build_message = ' '.join([

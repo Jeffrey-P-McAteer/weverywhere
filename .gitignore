@@ -1,7 +1,11 @@
 /.claude
 /bin
 /build
+/dist
 /out
+
+# Python bytecode cache from the uv-run scripts under ./scripts/
+__pycache__/
 
 # Added by cargo
 
