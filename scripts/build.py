@@ -16,13 +16,15 @@ Usage (from the repo root):
     uv run scripts/build.py                       # all six targets
     uv run scripts/build.py linux-x64 macos-arm64 # only the named targets
 
-Outputs (one per built target):
-    dist/linux-x64/weverywhere
-    dist/linux-arm64/weverywhere
-    dist/windows-x64/weverywhere.zip
-    dist/windows-arm64/weverywhere.zip
-    dist/macos-x64/weverywhere
-    dist/macos-arm64/weverywhere
+Outputs (every file names its version and target; <ver> = YYYY.MM.<hours>):
+    dist/linux-x64/weverywhere-<ver>-linux-x64
+    dist/linux-arm64/weverywhere-<ver>-linux-arm64
+    dist/windows-x64/weverywhere-<ver>-windows-x64.exe
+    dist/windows-x64/weverywhere-<ver>-windows-x64.zip      (contains the .exe above)
+    dist/windows-arm64/weverywhere-<ver>-windows-arm64.exe
+    dist/windows-arm64/weverywhere-<ver>-windows-arm64.zip  (contains the .exe above)
+    dist/macos-x64/weverywhere-<ver>-macos-x64
+    dist/macos-arm64/weverywhere-<ver>-macos-arm64
 
 The build version (YYYY.MM.<hours-into-month>, UTC) is resolved once here and
 exported as WEVERYWHERE_VERSION so build.rs bakes the identical string into every
@@ -244,24 +246,45 @@ def build_target(platform: str, triple: str) -> pathlib.Path:
     return binary
 
 
-def package_target(platform: str, binary: pathlib.Path) -> pathlib.Path:
-    """Stage the built binary under dist/<platform>/ and return the artifact."""
+def package_target(
+    platform: str, binary: pathlib.Path, version: str
+) -> list[pathlib.Path]:
+    """
+    Stage the built binary under dist/<platform>/ and return the artifact(s).
+
+    Every file is named weverywhere-<version>-<platform>[.ext] so its target and
+    version are obvious at a glance. Windows ships both the raw .exe and a .zip
+    of that same .exe (the archived entry keeps the identical full name).
+    """
+    # Rebuild the platform dir from scratch so stale, differently-versioned
+    # artifacts from an earlier run don't linger alongside the current ones.
     out_dir = DIST_DIR / platform
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    base = f"weverywhere-{version}-{platform}"
+    artifacts: list[pathlib.Path] = []
+
     if platform.startswith("windows"):
-        # Ship Windows builds as a .zip containing weverywhere.exe.
-        artifact = out_dir / "weverywhere.zip"
-        with zipfile.ZipFile(artifact, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.write(binary, "weverywhere.exe")
+        exe = out_dir / f"{base}.exe"
+        shutil.copy2(binary, exe)
+        artifacts.append(exe)
+
+        archive = out_dir / f"{base}.zip"
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.write(exe, exe.name)  # entry keeps the full weverywhere-<ver>-<plat>.exe name
+        artifacts.append(archive)
     else:
         # Linux and macOS ship the raw, executable binary.
-        artifact = out_dir / "weverywhere"
-        shutil.copy2(binary, artifact)
-        artifact.chmod(artifact.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        out_bin = out_dir / base
+        shutil.copy2(binary, out_bin)
+        out_bin.chmod(out_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        artifacts.append(out_bin)
 
-    print(f"[packaged] {artifact}")
-    return artifact
+    for a in artifacts:
+        print(f"[packaged] {a}")
+    return artifacts
 
 
 # -- main ----------------------------------------------------------------------
@@ -295,7 +318,7 @@ def main() -> None:
     artifacts: list[pathlib.Path] = []
     for platform in selected:
         binary = build_target(platform, TARGETS[platform])
-        artifacts.append(package_target(platform, binary))
+        artifacts.extend(package_target(platform, binary, version))
 
     print(f"\nDone. {len(artifacts)} artifact(s) staged under {DIST_DIR.relative_to(REPO_ROOT)}/:")
     for a in artifacts:

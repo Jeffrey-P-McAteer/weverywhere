@@ -406,26 +406,37 @@ class _ProgressReader:
 
 # -- artifacts -----------------------------------------------------------------
 
-# Platform -> (dist subdirectory / base filename, upload extension). Mirrors the
-# layout scripts/build.py stages under dist/.
-_ARTIFACTS = [
-    ("linux-x64",     "weverywhere", ""),
-    ("linux-arm64",   "weverywhere", ""),
-    ("windows-x64",   "weverywhere", ".zip"),
-    ("windows-arm64", "weverywhere", ".zip"),
-    ("macos-x64",     "weverywhere", ""),
-    ("macos-arm64",   "weverywhere", ""),
+# The six platforms scripts/build.py stages under dist/. Windows ships both the
+# raw .exe and a .zip of it; every other platform ships a single raw binary.
+_PLATFORMS = [
+    "linux-x64",
+    "linux-arm64",
+    "windows-x64",
+    "windows-arm64",
+    "macos-x64",
+    "macos-arm64",
 ]
 
 
+def _artifact_names(version: str, platform: str) -> list[str]:
+    base = f"{APP_NAME}-{version}-{platform}"
+    if platform.startswith("windows"):
+        return [f"{base}.exe", f"{base}.zip"]
+    return [base]
+
+
 def find_artifacts(version: str) -> list[tuple[Path, str]]:
-    """Return (local_path, upload_name) for every artifact that exists in dist/."""
+    """Return (local_path, upload_name) for every artifact that exists in dist/.
+
+    build.py already names each file weverywhere-<version>-<platform>[.ext], so
+    the on-disk filename is used verbatim as the GitHub asset name.
+    """
     result = []
-    for platform, base, ext in _ARTIFACTS:
-        local = DIST_DIR / platform / (base + ext)
-        if local.exists():
-            upload_name = f"{APP_NAME}-{version}-{platform}{ext}"
-            result.append((local, upload_name))
+    for platform in _PLATFORMS:
+        for name in _artifact_names(version, platform):
+            local = DIST_DIR / platform / name
+            if local.exists():
+                result.append((local, name))
     return result
 
 
@@ -446,7 +457,7 @@ def make_release_body(version: str, git_info: dict) -> str:
         "| Platform | Instructions |",
         "|---|---|",
         "| **Linux x64 / arm64** | `chmod +x weverywhere-*-linux-*` then run directly |",
-        "| **Windows x64 / arm64** | Extract the `.zip`, run `weverywhere.exe` |",
+        "| **Windows x64 / arm64** | Run the `.exe` directly, or extract the `.zip` (same binary inside) |",
         "| **macOS (Apple Silicon / Intel)** | `chmod +x weverywhere-*-macos-*` then run directly |",
     ])
 
