@@ -63,6 +63,12 @@ TARGETS: dict[str, str] = {
 
 REQUIRED_BINS = ["cargo", "zig", "git"]
 
+# Minimum cargo-zigbuild that correctly links zig's compiler-rt builtins for the
+# *-windows-gnullvm targets. 0.20.0 and older leave __chkstk / __divti3 /
+# __udivti3 / __umodti3 / __floatuntidf undefined when linking
+# aarch64-pc-windows-gnullvm; 0.23.0 is verified-good with zig 0.16.0.
+MIN_CARGO_ZIGBUILD = (0, 23, 0)
+
 
 # -- toolchain bootstrap -------------------------------------------------------
 
@@ -72,15 +78,43 @@ def check_required_bins() -> None:
             sys.exit(f'[fatal] required binary "{b}" not found on PATH. Install it and re-run.')
 
 
-def ensure_cargo_zigbuild() -> None:
+def _cargo_zigbuild_bin() -> str | None:
     # cargo resolves `cargo zigbuild` from a cargo-zigbuild binary on PATH or in
     # $CARGO_HOME/bin (~/.cargo/bin), the latter often absent from PATH under
-    # `uv run`, so check both before reinstalling.
+    # `uv run`, so check both.
+    found = shutil.which("cargo-zigbuild")
+    if found:
+        return found
     cargo_home = pathlib.Path(os.environ.get("CARGO_HOME", pathlib.Path.home() / ".cargo"))
-    if shutil.which("cargo-zigbuild") or (cargo_home / "bin" / "cargo-zigbuild").exists():
+    candidate = cargo_home / "bin" / "cargo-zigbuild"
+    return str(candidate) if candidate.exists() else None
+
+
+def _cargo_zigbuild_version(binary: str) -> tuple[int, ...] | None:
+    out = subprocess.run([binary, "--version"], capture_output=True, text=True)
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", out.stdout)
+    return tuple(int(g) for g in m.groups()) if m else None
+
+
+def ensure_cargo_zigbuild() -> None:
+    binary = _cargo_zigbuild_bin()
+    version = _cargo_zigbuild_version(binary) if binary else None
+
+    if version is not None and version >= MIN_CARGO_ZIGBUILD:
         return
-    print("cargo-zigbuild is required for cross-compilation; installing it now ...")
-    subprocess.run(["cargo", "install", "--locked", "cargo-zigbuild"], check=True)
+
+    want = ".".join(map(str, MIN_CARGO_ZIGBUILD))
+    if version is None:
+        print(f"cargo-zigbuild is required for cross-compilation; installing >= {want} ...")
+    else:
+        have = ".".join(map(str, version))
+        # 0.20.0 and older mislink the *-windows-gnullvm targets, so force the
+        # upgrade rather than silently building broken binaries.
+        print(f"cargo-zigbuild {have} is too old (need >= {want}); upgrading ...")
+
+    subprocess.run(
+        ["cargo", "install", "--locked", "--force", "cargo-zigbuild"], check=True
+    )
 
 
 def ensure_rust_targets(triples: list[str]) -> None:
