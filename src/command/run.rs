@@ -8,7 +8,7 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool
   // Step 1: Read the executable material & form an exeute request object, sign it, and transmit.
   let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!())?;
 
-  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!())?;
+  let local_config = config::Config::read_from_file(&args.config_path()).await.map_err(map_loc_err!())?;
 
   let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!())?;
 

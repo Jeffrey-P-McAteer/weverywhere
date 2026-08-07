@@ -6,7 +6,7 @@ use wasmtime::*;
 
 pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> DynResult<()> {
 
-  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!())?;
+  let local_config = config::Config::read_from_file(&args.config_path()).await.map_err(map_loc_err!())?;
 
   let wasm_bytes = tokio::fs::read(file_path).await.map_err(map_loc_err!())?;
 

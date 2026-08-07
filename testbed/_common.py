@@ -284,6 +284,15 @@ def build_cloud_init_seed(vm: dict, dest: Path) -> Path:
     passwd_hash = _sha512_crypt(vm_config.LOGIN_PASSWORD)
     iface = static_ip(vm)
 
+    # OS packages: cloud-init installs these with the distro package manager
+    # (dnf on Fedora, apt on Ubuntu) on first boot, landing binaries on PATH.
+    os_packages = vm.get("os-packages") or []
+    if os_packages:
+        packages_block = ("package_update: true\npackages:\n"
+                          + "".join(f"  - {p}\n" for p in os_packages))
+    else:
+        packages_block = ""
+
     meta_data = (
         # instance-id is tied to the build hash so a rebuild re-runs cloud-init.
         f"instance-id: {vm['hostname']}-{build_hash(vm)[:12]}\n"
@@ -306,7 +315,7 @@ users:
       - {pubkey}
 chpasswd:
   expire: false
-write_files:
+{packages_block}write_files:
   - path: /etc/systemd/system/weverywhere-test.service
     permissions: '0644'
     content: |
@@ -560,6 +569,27 @@ def _windows_provision_cmd(vm, iface, pubkey: str) -> str:
     ip = str(iface.ip)
     mask = str(iface.network.netmask)
     gw = host_gateway_ip()
+
+    # OS packages via Chocolatey. choco installs to C:\\ProgramData\\chocolatey and
+    # adds its \\bin shim directory to the *machine* PATH, so the tools are on PATH
+    # for every user on the next boot. Built as a plain string (real braces) and
+    # spliced into the f-string below, so no brace-escaping is needed here.
+    os_packages = vm.get("os-packages") or []
+    if os_packages:
+        pkg_list = ",".join(f"'{p}'" for p in os_packages)
+        choco_block = (
+            "rem --- OS packages via Chocolatey (adds its bin dir to the system PATH) ---\n"
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command ^\n"
+            "  \"$ErrorActionPreference='Continue';\" ^\n"
+            "  \"$choco='C:\\ProgramData\\chocolatey\\bin\\choco.exe';\" ^\n"
+            "  \"if (-not (Test-Path $choco)) { [Net.ServicePointManager]::SecurityProtocol=3072;"
+            " iex ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')) };\" ^\n"
+            "  \"foreach ($p in @(PKGS)) { & $choco install $p -y --no-progress }\">>\"%LOG%\" 2>&1\n"
+            "\n"
+        ).replace("PKGS", pkg_list)
+    else:
+        choco_block = ""
+
     return f"""@echo off
 set SRC=C:\\weverywhere-setup
 set LOG=%SRC%\\provision.log
@@ -583,7 +613,7 @@ md "C:\\ProgramData\\ssh" 2>nul
 echo {pubkey}>"C:\\ProgramData\\ssh\\administrators_authorized_keys"
 icacls "C:\\ProgramData\\ssh\\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F">>"%LOG%" 2>&1
 
-rem --- hard-coded static IP on the first physical adapter ---
+{choco_block}rem --- hard-coded static IP on the first physical adapter ---
 for /f "tokens=*" %%N in ('powershell -NoProfile -Command "(Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -First 1).Name"') do set NIC=%%N
 netsh interface ip set address name="%NIC%" static {ip} {mask} {gw}>>"%LOG%" 2>&1
 
@@ -712,13 +742,27 @@ def _nic_args(vm: dict, netdev: str) -> list[str]:
             "-netdev", netdev]
 
 
+def _install_user_netdev() -> str:
+    """
+    qemu user-mode (SLIRP) netdev for the install/provision boot, configured to
+    use the SAME subnet and gateway the VMs get on the real bridge. SLIRP then
+    NATs the guest to the internet even though the guest has already applied its
+    hard-coded static IP + gateway - so package managers (dnf/apt/choco) have
+    connectivity during provisioning while the network config stays identical to
+    the run phase. No host interface is created, so there is nothing to tear down.
+    """
+    iface = host_bridge_iface()  # e.g. 10.0.255.254/16
+    net = iface.network
+    return f"user,id=n0,net={net.network_address}/{net.prefixlen},host={iface.ip}"
+
+
 def qemu_install_cmd(vm: dict, *, disp: list[str]) -> list[str]:
     """qemu command for the unattended install/provision boot (user-mode net)."""
     cmd = qemu_base(vm, disp=disp)
     cmd += _disk_args(vm)
-    # User-mode networking: gives the guest outbound access with zero host
-    # interfaces to create or tear down.
-    cmd += _nic_args(vm, "user,id=n0")
+    # User-mode networking on the VMs' own subnet: gives the guest outbound
+    # internet (for package installs) with zero host interfaces to tear down.
+    cmd += _nic_args(vm, _install_user_netdev())
     if is_windows(vm):
         win_iso = CACHE_DIR / vm_config.WINDOWS_ISO_NAME
         cfg_iso = vm_dir(vm) / "config.iso"

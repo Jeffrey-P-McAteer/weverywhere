@@ -4,7 +4,7 @@ use super::*;
 #[allow(unreachable_code)]
 pub async fn serve(args: &args::Args, multicast_group: args::MulticastAddressVec, port: u16) -> DynResult<()> {
 
-  let local_config = config::Config::read_from_file(&args.config).await.map_err(map_loc_err!())?;
+  let local_config = config::Config::read_from_file(&args.config_path()).await.map_err(map_loc_err!())?;
   let executor = executor::Executor::new(&local_config).await;
 
   let mut tasks = tokio::task::JoinSet::new();

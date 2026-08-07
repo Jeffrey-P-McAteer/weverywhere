@@ -2,9 +2,10 @@
 use super::*;
 
 pub async fn configuration(args: &args::Args, style: ConfigStyle) -> DynResult<()> {
-  match config::Config::read_from_file(&args.config).await {
+  let config_path = args.config_path();
+  match config::Config::read_from_file(&config_path).await {
     Ok(config_struct) => {
-      tracing::info!("Configuration from {:?}", args.config);
+      tracing::info!("Configuration from {:?}", config_path);
       tracing::info!("{:#?}", config_struct);
 
       if style == ConfigStyle::CreateMissingKeys {
@@ -30,7 +31,7 @@ pub async fn configuration(args: &args::Args, style: ConfigStyle) -> DynResult<(
 
     }
     Err(e) => {
-      tracing::warn!("Failed to parse the config file {:?}", args.config);
+      tracing::warn!("Failed to parse the config file {:?}", config_path);
       if let Some(parse_error) = e.downcast_ref::<toml::de::Error>() {
         tracing::warn!("> {}", parse_error.message());
       }

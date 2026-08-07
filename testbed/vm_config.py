@@ -9,6 +9,9 @@ VMS = [
       'ram-mb': 8192,
       'static-ip': '10.0.0.1/16',
       'bootup-binary': r'C:\weverywhere\weverywhere-{VERSION}-windows-x64.exe',
+      'os-packages': [
+        'vim', 'cat'
+      ],
     },
     {
       'os': 'windows',
@@ -19,6 +22,9 @@ VMS = [
       'ram-mb': 8192,
       'static-ip': '10.0.0.2/16',
       'bootup-binary': r'C:\weverywhere\weverywhere-{VERSION}-windows-x64.exe',
+      'os-packages': [
+        'vim', 'cat'
+      ],
     },
     {
       'os': 'fedora',
@@ -29,6 +35,9 @@ VMS = [
       'ram-mb': 4096,
       'static-ip': '10.0.10.1/16',
       'bootup-binary': r'/opt/weverywhere/weverywhere-{VERSION}-linux-x64',
+      'os-packages': [
+        'vim', 'nmap'
+      ],
     },
     {
       'os': 'ubuntu',
@@ -39,6 +48,9 @@ VMS = [
       'ram-mb': 4096,
       'static-ip': '10.0.10.2/16',
       'bootup-binary': r'/opt/weverywhere/weverywhere-{VERSION}-linux-x64',
+      'os-packages': [
+        'vim', 'nmap'
+      ],
     },
 ]
 

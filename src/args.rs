@@ -19,10 +19,42 @@ pub struct Args {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbosity: u8,
 
-    /// Path to the WASI file
-    #[arg(short, long, default_value = "/etc/weverywhere.toml" )]
-    pub config: std::path::PathBuf,
+    /// Path to the weverywhere.toml configuration file. When omitted, weverywhere looks next to the
+    /// installed binary (<bin>/../etc/weverywhere.toml, the install-to layout) and then falls back
+    /// to the platform's system config path (see --help output / config_path()).
+    #[arg(short, long)]
+    pub config: Option<std::path::PathBuf>,
 
+}
+
+/// The platform's default system-wide config location, used when --config is not given and no
+/// config was found next to the binary. weverywhere.toml is machine-wide (the daemon runs as
+/// root / SYSTEM), so we use each OS's conventional machine config directory.
+pub fn default_config_path() -> std::path::PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        // e.g. C:\ProgramData\weverywhere\weverywhere.toml
+        let base = std::env::var_os("ProgramData")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+        return base.join("weverywhere").join("weverywhere.toml");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return std::path::PathBuf::from("/Library/Application Support/weverywhere/weverywhere.toml");
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        return std::path::PathBuf::from("/etc/weverywhere.toml");
+    }
+}
+
+/// The config that `install-to <root>` stages next to the binary (<bin>/../etc/weverywhere.toml).
+/// Returned only when it actually exists so discovery can prefer it over the system default.
+fn exe_relative_config() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.parent()?.join("..").join("etc").join("weverywhere.toml");
+    std::fs::canonicalize(candidate).ok()
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -43,6 +75,8 @@ pub enum Command {
 
     },
 
+    /// Install weverywhere into a filesystem tree: extract the embedded etc/ config templates and
+    /// copy this binary under INSTALL_ROOT (into etc/ and bin/ by default).
     InstallTo {
         /// Path to root of system to install into.
         /// This generally must run as root and will write to files under etc/ and bin/
@@ -138,6 +172,20 @@ fn default_multicast_groups() -> MulticastAddressVec {
 
 
 impl Args {
+    /// Resolve the config file path across platforms:
+    ///   1. an explicit `--config <path>` always wins;
+    ///   2. otherwise a config staged next to the binary (install-to layout), if present;
+    ///   3. otherwise the platform's default system config path.
+    pub fn config_path(&self) -> std::path::PathBuf {
+        if let Some(explicit) = &self.config {
+            return explicit.clone();
+        }
+        if let Some(found) = exe_relative_config() {
+            return found;
+        }
+        default_config_path()
+    }
+
     pub fn v_is_info(&self) -> bool {
         return self.verbosity > 0;
     }

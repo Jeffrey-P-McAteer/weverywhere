@@ -56,7 +56,8 @@ async fn handle_friendly_ux_warnings(args: &mut args::Args) {
     if let args::Command::GenerateMissingKeys {} = args.command {
         return;
     }
-    match config::Config::read_from_file(&args.config).await.map_err(map_loc_err!()) {
+    let config_path = args.config_path();
+    match config::Config::read_from_file(&config_path).await.map_err(map_loc_err!()) {
         Ok(local_config) => {
             // Check if a key exists; if not offer to run "Command::GenerateMissingKeys"
             match local_config.identity.read_public_key_ed25519_pem_file().await {
@@ -72,7 +73,7 @@ async fn handle_friendly_ux_warnings(args: &mut args::Args) {
             }
         }
         Err(e) => {
-            tracing::info!("WARNING: You have no config file located at {:?} ({})", &args.config, e);
+            tracing::info!("WARNING: You have no config file located at {:?} ({})", &config_path, e);
         }
     }
 }
