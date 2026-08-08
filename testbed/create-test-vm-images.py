@@ -40,10 +40,26 @@ import argparse
 import subprocess
 import sys
 import time
+import functools
+import time
 
 import _common as c
 
+def timed(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        duration = int(time.perf_counter() - start)
 
+        minutes, seconds = divmod(duration, 60)
+
+        print(f"{func.__name__} took {minutes}m {seconds:02d}s")
+        return result
+
+    return wrapper
+
+@timed
 def build_linux(vm: dict, args) -> None:
     base_url = c.vm_config.IMAGE_SOURCES.get(vm["os"].lower())
     if not base_url:
@@ -70,6 +86,7 @@ def build_linux(vm: dict, args) -> None:
     _run_install_boot(vm, args, timeout=1800)
 
 
+@timed
 def build_windows(vm: dict, args) -> None:
     # The config ISO and blank disk need no external ISO, so build them first.
     c.build_windows_config(vm, c.vm_dir(vm) / "config.iso")
@@ -111,7 +128,7 @@ def _require_windows_iso(win_iso) -> None:
     print("=" * 72)
     try:
         while not (win_iso.exists() and win_iso.stat().st_size > 0):
-            time.sleep(3)
+            time.sleep(1)
     except KeyboardInterrupt:
         sys.exit("\n[testbed] aborted while waiting for the Windows ISO.")
     c.log(f"found {win_iso.name} ({c.human_bytes(win_iso.stat().st_size)})")
@@ -139,6 +156,7 @@ def _run_install_boot(vm: dict, args, *, timeout: int) -> None:
           f"{int(time.time() - start)}s")
 
 
+@timed
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build weverywhere test VM images")
     ap.add_argument("vms", nargs="*", help="hostnames to build (default: all)")
