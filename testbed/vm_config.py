@@ -71,7 +71,7 @@ BRIDGE_NAME = 'brweve'          # host bridge all VM taps attach to
 TAP_PREFIX  = 'tapweve'         # per-VM tap devices: tapweve0, tapweve1, ...
 
 # Size of each VM's system disk (thin-provisioned in the qcow2).
-DISK_SIZE_GB = 40
+DISK_SIZE_GB = 56
 
 # Console/login password for the created user. SSH itself uses the generated
 # key pair (testbed/vms/<hostname>/id_ed25519); this is only for the local
