@@ -8,6 +8,7 @@ mod args;
 mod config;
 mod comm;
 mod command;
+mod embedded_programs;
 mod executor;
 mod universal_serde;
 mod net_utils;

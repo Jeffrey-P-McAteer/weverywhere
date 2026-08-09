@@ -10,6 +10,7 @@ pub mod run;
 pub mod run_local;
 pub mod serve;
 pub mod netmap;
+pub mod extract_programs;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ConfigStyle {
@@ -43,6 +44,9 @@ pub async fn run_command(cmd: &args::Command, args: &args::Args) -> DynResult<()
     }
     Command::Netmap { program, local, multicast_groups, port } => {
       netmap::netmap(args, program.clone(), *local, multicast_groups.clone(), *port).await.map_err(map_loc_err!())?;
+    }
+    Command::ExtractPrograms { out_dir } => {
+      extract_programs::extract_programs(out_dir).await.map_err(map_loc_err!())?;
     }
     Command::Daemon { action } => {
       daemon::daemon(action, args).await.map_err(map_loc_err!())?;

@@ -1,0 +1,13 @@
+# Programs compiled and embedded into the weverywhere binary at build time.
+#
+# One program per line, named by its source file stem (so "network-map" -> network-map.c).
+# build.rs compiles each with zig (honouring the file's `// COMPILE:` line) and bakes the
+# resulting .wasm bytes into the binary. Commands that default to a bundled program (e.g.
+# `netmap`) then run the in-memory bytes with no external .wasm file, so a moved binary is
+# self-contained. Users can still override with `--program <FILE>` and can dump every embedded
+# program back to disk with `weverywhere extract-programs <DIR>`.
+#
+# Blank lines and lines starting with '#' are ignored. Keep this list small: each program adds
+# its compiled size to every platform binary.
+
+network-map

@@ -18,19 +18,10 @@ pub async fn netmap(
   multicast_groups: args::MulticastAddressVec,
   port: u16,
 ) -> DynResult<()> {
-  let program_path = program.unwrap_or_else(default_program_path);
-
-  let wasm_bytes = match tokio::fs::read(&program_path).await {
-    Ok(b) => b,
-    Err(e) => {
-      return Err(format!(
-        "Could not read the discovery program at {:?} ({}).\n\
-         Build the bundled example with:  uv run scripts/compile-example-programs.py\n\
-         or point at your own with:       weverywhere netmap --program <FILE.wasm>",
-        program_path, e
-      ).into());
-    }
-  };
+  let (wasm_bytes, program_label) = resolve_discovery_program(program).await?;
+  if crate::v_is_info() {
+    tracing::info!("[ netmap ] discovery program: {}", program_label);
+  }
 
   // Sign the discovery program with our identity, exactly like `run` does, so servers can decide
   // whether they trust us (which they then report back to us as the per-node trust marker).
@@ -38,9 +29,7 @@ pub async fn netmap(
   let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!())?;
 
   let pd = executor::ProgramDataBuilder::new()
-    .set_human_name(
-      program_path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "network-map".to_string())
-    )
+    .set_human_name(EMBEDDED_DISCOVERY_NAME.to_string())
     .set_wasm_program_bytes(&wasm_bytes)
     .set_source(&source)
     .build().map_err(map_loc_err!())?;
@@ -62,9 +51,47 @@ pub async fn netmap(
   Ok(())
 }
 
-/// Where we look for the compiled discovery program when `--program` is not given.
+/// The stem of the bundled discovery program (see example-programs/embedded.list + network-map.c).
+const EMBEDDED_DISCOVERY_NAME: &str = "network-map";
+
+/// On-disk location of the compiled discovery program, used only as a last-resort dev fallback when
+/// nothing is embedded (e.g. zig was missing at build time).
 fn default_program_path() -> std::path::PathBuf {
-  std::path::PathBuf::from("target").join("example-programs").join("network-map.wasm")
+  std::path::PathBuf::from("target").join("example-programs").join(format!("{EMBEDDED_DISCOVERY_NAME}.wasm"))
+}
+
+/// Resolve which discovery program bytes to send, in precedence order:
+///   1. an explicit `--program <FILE>` override (always wins);
+///   2. the program embedded in this binary at build time (the normal, file-free path);
+///   3. the compiled example on disk (dev convenience when nothing was embedded).
+/// Returns the bytes plus a short human label describing where they came from.
+async fn resolve_discovery_program(program: Option<std::path::PathBuf>) -> DynResult<(Vec<u8>, String)> {
+  // 1. Explicit override.
+  if let Some(path) = program {
+    match tokio::fs::read(&path).await {
+      Ok(bytes) => return Ok((bytes, format!("override file {}", path.display()))),
+      Err(e) => return Err(format!("Could not read --program {:?} ({})", path, e).into()),
+    }
+  }
+
+  // 2. Embedded bytes — the whole point: a moved binary needs no external .wasm.
+  if let Some(bytes) = crate::embedded_programs::get(EMBEDDED_DISCOVERY_NAME) {
+    return Ok((bytes.to_vec(), format!("embedded '{EMBEDDED_DISCOVERY_NAME}'")));
+  }
+
+  // 3. Dev fallback: the on-disk compiled example.
+  let fallback = default_program_path();
+  match tokio::fs::read(&fallback).await {
+    Ok(bytes) => Ok((bytes, format!("on-disk {}", fallback.display()))),
+    Err(e) => Err(format!(
+      "No discovery program available: this binary has no embedded '{EMBEDDED_DISCOVERY_NAME}' and \
+       {:?} could not be read ({}).\n\
+       Build the binary with zig installed to embed it, run \
+       `uv run scripts/compile-example-programs.py` to produce the on-disk copy, \
+       or pass your own with `weverywhere netmap --program <FILE.wasm>`.",
+      fallback, e
+    ).into()),
+  }
 }
 
 /// --local path: fire the discovery program at the daemon on 127.0.0.1 and collect its reply.

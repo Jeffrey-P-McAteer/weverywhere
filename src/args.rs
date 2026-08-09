@@ -130,6 +130,15 @@ pub enum Command {
 
     },
 
+    /// Extract every WASI program embedded in this binary to a directory (one <name>.wasm per
+    /// program). Useful for inspecting a bundled program (see `weverywhere info`) or feeding it back
+    /// via `--program`. Running embedded programs never requires extracting them first.
+    ExtractPrograms {
+        /// Directory to write the <name>.wasm files into (created if missing). Defaults to the CWD.
+        #[arg(default_value = ".")]
+        out_dir: std::path::PathBuf,
+    },
+
     /// Discover the weverywhere fabric and draw a trust-annotated map of it. This sends a WASI
     /// discovery *program* to every reachable server (the whole multicast fabric by default, or
     /// only the local daemon with --local), collects the hostname + observed peers each server

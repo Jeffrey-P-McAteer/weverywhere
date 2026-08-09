@@ -53,7 +53,7 @@ This is a single rust binary.
  - Source code lives under `./src/*`
  - Example server configuration lies under `./etc/*` and is embedded into the binary; sample config may be extracted to your system with a sub-command (see `weverywhere --help` for details).
  - Build and packaging scripts live under `./scripts/*` and are self-contained `uv run` scripts.
- - Example WASMI programs are under `./example-programs/` and may be compiled with `uv run scripts/compile-example-programs.py` into `./target/example-programs/<NAME>.wasi`
+ - Example WASMI programs are under `./example-programs/` and may be compiled with `uv run scripts/compile-example-programs.py` into `./target/example-programs/<NAME>.wasi`. The subset named in `./example-programs/embedded.list` is additionally compiled by `build.rs` and embedded into the binary (see *Embedded programs*).
  - `scripts/update-github-pages.py` does what it says on the tin, and is currently a big mess copied from another project.
  - `scripts/build.py` cross-compiles the rust code on a Linux x86_64 host to all six release targets (linux/windows/macos x64 and arm64) and stages the artifacts under `./dist/`.
  - `scripts/publish.py` builds (via `scripts/build.py`) and publishes a versioned GitHub release with all six platform artifacts attached. Run `uv run scripts/publish.py --init-creds` once to set up a token.
@@ -122,11 +122,14 @@ weverywhere netmap --local
 weverywhere netmap --program ./my-topology-probe.wasi
 ```
 
+By default `netmap` uses the discovery program **embedded in the binary** (see *Embedded programs*
+below), so a copied binary needs no external `.wasm` file. `--program` overrides it with your own.
+
 How it works:
 
 1. `netmap` signs and broadcasts the discovery program (`example-programs/network-map.c`, compiled
-   to `target/example-programs/network-map.wasm`) to the fabric. Multicast delivers it to every
-   reachable Executor at once — that is the "jump to all servers".
+   and embedded at build time; overridable with `--program`) to the fabric. Multicast delivers it to
+   every reachable Executor at once — that is the "jump to all servers".
 2. Each Executor runs the program, which calls host imports to report what it knows *locally*:
     - `host::hostname(ptr, cap)` — the node's OS hostname.
     - `host::trusts_me()` — whether that node trusts **you** (the caller's signing key).
@@ -154,6 +157,26 @@ weverywhere network map
 
 To design a richer view (services exposed, load, RAM, multi-hop forwarding, ...), write a different
 WASI program and hand it to `netmap --program` — no changes to `weverywhere` itself are required.
+
+# Embedded programs
+
+Selected example programs are compiled and **baked into the binary** at build time so that commands
+which ship a bundled program (currently `netmap`) work with no external `.wasm` files — important
+for fast, self-contained deployments where the binary is copied around.
+
+- The set to embed is listed, one program stem per line, in `example-programs/embedded.list`
+  (the single source of truth).
+- `build.rs` compiles each with zig (honouring the source's `// COMPILE:` line) and generates the
+  `EMBEDDED_PROGRAMS` table that `src/embedded_programs.rs` exposes. If zig is unavailable the build
+  still succeeds — it just embeds nothing and emits a warning, and callers fall back as below.
+- Resolution order for a bundled program: `--program <FILE>` override → embedded bytes → the on-disk
+  compiled example (`target/example-programs/<name>.wasm`, a dev convenience).
+- Dump every embedded program back to disk (e.g. to inspect with `weverywhere info` or pass via
+  `--program`) with:
+
+  ```bash
+  weverywhere extract-programs ./out-dir
+  ```
 
 # Project-level Missing Pieces and TODOs
 
