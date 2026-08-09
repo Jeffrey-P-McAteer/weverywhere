@@ -24,7 +24,8 @@ Design notes
 
 * Networking is split so teardown is trivially correct: the install phase uses
   qemu user-mode networking (zero host interfaces), and only the run phase
-  creates a bridge + taps, which are always removed on exit.
+  creates a bridge + taps (plus NAT out the host uplink for VM internet access),
+  all of which are always removed/reverted on exit.
 """
 
 from __future__ import annotations
@@ -131,6 +132,53 @@ def weverywhere_platform(vm: dict) -> str:
     return "windows-x64" if is_windows(vm) else "linux-x64"
 
 
+def guest_bin_dir(vm: dict) -> str:
+    """The in-guest directory the weverywhere binary is installed into."""
+    guest_path = bootup_binary_path(vm)
+    sep = "\\" if is_windows(vm) else "/"
+    return guest_path.rsplit(sep, 1)[0]
+
+
+def guest_identity_keyfile(vm: dict) -> str:
+    """In-guest path for this node's persistent ed25519 identity key."""
+    sep = "\\" if is_windows(vm) else "/"
+    return f"{guest_bin_dir(vm)}{sep}identity.pem"
+
+
+def guest_config_path(vm: dict) -> str:
+    """
+    Where serve looks for its config by default (see args::default_config_path in
+    the Rust source). `daemon install` runs `serve` with no --config, so the
+    config must live here for the boot daemon to start instead of crash-looping.
+    """
+    if is_windows(vm):
+        return r"C:\ProgramData\weverywhere\weverywhere.toml"
+    return "/etc/weverywhere.toml"
+
+
+def guest_config_toml(vm: dict) -> str:
+    """
+    Minimal weverywhere.toml for a testbed node. `serve` refuses to start without
+    a config file, so every guest gets one. The identity name is the hostname so
+    `weverywhere netmap` labels the node clearly; keyfile is a persistent path
+    populated by `generate-missing-keys` so the node trusts itself across reboots.
+    The keyfile is a TOML *literal* (single-quoted) string so Windows backslashes
+    need no escaping.
+    """
+    return f"""[identity]
+name = "{vm['hostname']}"
+keyfile = '{guest_identity_keyfile(vm)}'
+
+[limits.trusted]
+max_cpu_instructions = 4611686018427387904 # 2**62
+max_memory_bytes = 4611686018427387904
+
+[limits.untrusted]
+max_cpu_instructions = 65536
+max_memory_bytes = 65536
+"""
+
+
 def host_weverywhere_binary(vm: dict) -> Path:
     """The freshly built host-side artifact that gets baked into this VM."""
     plat = weverywhere_platform(vm)
@@ -196,6 +244,24 @@ def host_bridge_iface() -> ipaddress.IPv4Interface:
 def host_gateway_ip() -> str:
     """The address VMs use as their default gateway (the host's bridge IP)."""
     return str(host_bridge_iface().ip)
+
+
+def host_uplink_iface() -> str | None:
+    """
+    The host's own internet-facing interface: the device of its default route.
+    VMs reach the internet by routing through the bridge to the host, which then
+    NATs (masquerades) their traffic out this uplink. Returns None if the host
+    has no default route (then run phase stays LAN-only, no NAT is set up).
+    """
+    out = run(["ip", "-o", "route", "show", "default"], capture=True, check=False)
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if "dev" in parts:
+            dev = parts[parts.index("dev") + 1]
+            # Never NAT out of our own bridge (can happen if it holds a default route).
+            if dev != vm_config.BRIDGE_NAME:
+                return dev
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -281,6 +347,13 @@ def build_cloud_init_seed(vm: dict, dest: Path) -> Path:
     binary = host_weverywhere_binary(vm)
     guest_path = bootup_binary_path(vm)
     guest_dir = guest_path.rsplit("/", 1)[0]
+    guest_config = guest_config_path(vm)
+    # weverywhere.toml written via cloud-init write_files, indented into the YAML
+    # literal block (6 spaces); blank lines stay blank.
+    config_block = "".join(
+        (f"      {line}" if line.strip() else line)
+        for line in guest_config_toml(vm).splitlines(keepends=True)
+    )
     passwd_hash = _sha512_crypt(vm_config.LOGIN_PASSWORD)
     iface = static_ip(vm)
 
@@ -316,27 +389,22 @@ users:
 chpasswd:
   expire: false
 {packages_block}write_files:
-  - path: /etc/systemd/system/weverywhere-test.service
+  - path: {guest_config}
     permissions: '0644'
     content: |
-      [Unit]
-      Description=weverywhere testbed boot binary
-      After=network-online.target
-      Wants=network-online.target
-      [Service]
-      Type=simple
-      ExecStart={guest_path}
-      Restart=on-failure
-      [Install]
-      WantedBy=multi-user.target
-runcmd:
+{config_block}runcmd:
   - [ mkdir, -p, {guest_dir} ]
   - [ sh, -c, 'for d in /dev/disk/by-label/CIDATA /dev/disk/by-label/cidata /dev/sr0; do mount -o ro "$d" /mnt 2>/dev/null && break; done' ]
   - [ sh, -c, 'cp /mnt/wevebinary {guest_path}' ]
   - [ chmod, '0755', {guest_path} ]
   - [ umount, /mnt ]
-  - [ systemctl, daemon-reload ]
-  - [ systemctl, enable, weverywhere-test.service ]
+  # Generate this node's identity key (so it trusts itself), then register
+  # weverywhere's own systemd service (runs `serve`, which joins the multicast
+  # fabric AND listens for direct/unicast traffic) and enable it at boot.
+  # `daemon install` writes/enables the unit and starts it now; the power_state
+  # poweroff below then ends this provisioning boot.
+  - [ sh, -c, '{guest_path} generate-missing-keys' ]
+  - [ sh, -c, '{guest_path} daemon install' ]
 power_state:
   mode: poweroff
   message: cloud-init provisioning complete
@@ -407,6 +475,7 @@ def build_windows_config(vm: dict, dest: Path) -> Path:
     _iso_add(iso, autounattend.encode("utf-8"), "autounattend.xml")
     _iso_add(iso, stage.encode("utf-8"), "stage.cmd")
     _iso_add(iso, provision.encode("utf-8"), "provision.cmd")
+    _iso_add(iso, guest_config_toml(vm).encode("utf-8"), "weverywhere.toml")
     _iso_add(iso, binary.read_bytes(), "wevebinary.exe")
     _iso_add(iso, openssh_zip.read_bytes(), "OpenSSH-Win64.zip")
     iso.write(str(dest))
@@ -566,6 +635,8 @@ def _windows_provision_cmd(vm, iface, pubkey: str) -> str:
     """
     guest_path = bootup_binary_path(vm)
     guest_dir = guest_path.rsplit("\\", 1)[0]
+    config_path = guest_config_path(vm)
+    config_dir = config_path.rsplit("\\", 1)[0]
     ip = str(iface.ip)
     mask = str(iface.network.netmask)
     gw = host_gateway_ip()
@@ -599,6 +670,10 @@ rem --- weverywhere binary into place ---
 md "{guest_dir}" 2>nul
 copy /y "%SRC%\\wevebinary.exe" "{guest_path}">>"%LOG%" 2>&1
 
+rem --- weverywhere config into serve's default system location ---
+md "{config_dir}" 2>nul
+copy /y "%SRC%\\weverywhere.toml" "{config_path}">>"%LOG%" 2>&1
+
 rem --- OpenSSH server from the bundled zip (idempotent) ---
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='Continue';" ^
@@ -613,12 +688,19 @@ md "C:\\ProgramData\\ssh" 2>nul
 echo {pubkey}>"C:\\ProgramData\\ssh\\administrators_authorized_keys"
 icacls "C:\\ProgramData\\ssh\\administrators_authorized_keys" /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F">>"%LOG%" 2>&1
 
-{choco_block}rem --- hard-coded static IP on the first physical adapter ---
+{choco_block}rem --- hard-coded static IP + DNS on the first physical adapter (DNS so the
+rem     static-IP config can still resolve names once the host is NATing it) ---
 for /f "tokens=*" %%N in ('powershell -NoProfile -Command "(Get-NetAdapter -Physical | Sort-Object ifIndex | Select-Object -First 1).Name"') do set NIC=%%N
 netsh interface ip set address name="%NIC%" static {ip} {mask} {gw}>>"%LOG%" 2>&1
+netsh interface ip set dns name="%NIC%" static 1.1.1.1>>"%LOG%" 2>&1
+netsh interface ip add dns name="%NIC%" 9.9.9.9 index=2>>"%LOG%" 2>&1
 
-rem --- run the weverywhere binary at every boot ---
-schtasks /create /tn weverywhere-test /tr "\"{guest_path}\"" /sc onstart /ru SYSTEM /rl HIGHEST /f>>"%LOG%" 2>&1
+rem --- generate this node's identity key (so it trusts itself), then register +
+rem     start weverywhere's own daemon: a Task Scheduler onstart task that runs
+rem     `serve` (joins the multicast fabric and listens for direct traffic).
+rem     `daemon install` also starts it now. ---
+"{guest_path}" generate-missing-keys>>"%LOG%" 2>&1
+"{guest_path}" daemon install>>"%LOG%" 2>&1
 
 echo [provision] done %DATE% %TIME%>>"%LOG%" 2>&1
 rem --- power off so create-test-vm-images.py sees the install finish ---
@@ -808,15 +890,21 @@ def qmp_powerdown(qmp_sock: Path) -> bool:
 class HostNetwork:
     """
     Creates a bridge holding the host's gateway IP, plus one tap per VM, and
-    removes every interface it created on exit. Register once as a context
-    manager; teardown also runs on atexit and on SIGINT/SIGTERM/SIGHUP so no
-    virtual interfaces are ever left behind.
+    sets up NAT (IPv4 forwarding + masquerade out the host uplink) so the VMs
+    reach the internet on their static IPs. Removes every interface AND every
+    NAT change it made on exit. Register once as a context manager; teardown also
+    runs on atexit and on SIGINT/SIGTERM/SIGHUP so nothing is ever left behind.
     """
 
     def __init__(self) -> None:
         self.bridge = vm_config.BRIDGE_NAME
         self._created: list[tuple[str, str]] = []  # (kind, name), teardown LIFO
         self._torn_down = False
+        # Internet-access (NAT) state, populated by _enable_internet() and undone
+        # in teardown so the host is left exactly as we found it.
+        self._uplink: str | None = None
+        self._ip_forward_prev: str | None = None      # sysctl value to restore
+        self._nat_rules: list[tuple[str, str, list[str]]] = []  # (table, chain, spec)
 
     # -- lifecycle --------------------------------------------------------
     def __enter__(self) -> "HostNetwork":
@@ -854,12 +942,68 @@ class HostNetwork:
             run(["ip", "link", "set", tap, "master", self.bridge], sudo=True)
             run(["ip", "link", "set", tap, "up"], sudo=True)
 
+        self._enable_internet()
+
+    # -- internet access (NAT) --------------------------------------------
+    def _enable_internet(self) -> None:
+        """
+        Give the VMs internet access on their static IPs: turn on IPv4 forwarding
+        and masquerade the VM subnet out the host's uplink. Every change is
+        recorded so teardown() reverts it. Best-effort - if it fails the VMs keep
+        LAN-only connectivity, so a NAT hiccup never blocks bringing the VMs up.
+        """
+        uplink = host_uplink_iface()
+        if not uplink:
+            log("no host default route found; skipping NAT (VMs will be LAN-only)")
+            return
+        subnet = str(host_bridge_iface().network)  # e.g. 10.0.0.0/16
+        try:
+            prev = run(["sysctl", "-n", "net.ipv4.ip_forward"],
+                       capture=True, check=False).stdout.strip()
+            self._ip_forward_prev = prev or None
+            run(["sysctl", "-w", "net.ipv4.ip_forward=1"], sudo=True)
+
+            log(f"enabling NAT: {subnet} -> {uplink} (masquerade) for VM internet")
+            self._uplink = uplink
+            rules = [
+                ("nat", "POSTROUTING",
+                 ["-s", subnet, "-o", uplink, "-j", "MASQUERADE"]),
+                ("filter", "FORWARD",
+                 ["-i", self.bridge, "-o", uplink, "-j", "ACCEPT"]),
+                ("filter", "FORWARD",
+                 ["-i", uplink, "-o", self.bridge,
+                  "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"]),
+            ]
+            for table, chain, spec in rules:
+                self._add_nat_rule(table, chain, spec)
+        except Exception as e:  # noqa: BLE001 - NAT is best-effort, never fatal
+            log(f"WARNING: could not set up NAT ({e}); VMs will be LAN-only")
+
+    def _add_nat_rule(self, table: str, chain: str, spec: list[str]) -> None:
+        """Insert an iptables rule once (idempotent) and record it for teardown."""
+        exists = run(["iptables", "-t", table, "-C", chain, *spec],
+                     sudo=True, check=False, capture=True).returncode == 0
+        if not exists:
+            run(["iptables", "-t", table, "-A", chain, *spec], sudo=True)
+        self._nat_rules.append((table, chain, spec))
+
+    def _disable_internet(self) -> None:
+        for table, chain, spec in reversed(self._nat_rules):
+            run(["iptables", "-t", table, "-D", chain, *spec],
+                sudo=True, check=False)
+        self._nat_rules.clear()
+        if self._ip_forward_prev is not None:
+            run(["sysctl", "-w", f"net.ipv4.ip_forward={self._ip_forward_prev}"],
+                sudo=True, check=False)
+            self._ip_forward_prev = None
+
     # -- teardown ---------------------------------------------------------
     def teardown(self) -> None:
         if self._torn_down:
             return
         self._torn_down = True
         log("tearing down host network interfaces ...")
+        self._disable_internet()
         for kind, name in reversed(self._created):
             run(["ip", "link", "del", name], sudo=True, check=False)
         self._created.clear()

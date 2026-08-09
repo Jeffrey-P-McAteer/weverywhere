@@ -9,9 +9,10 @@
 Boot the weverywhere test VMs on a shared host network and SSH into them.
 
 This brings up one Linux bridge (holding the host's gateway IP) with a tap
-device per VM, boots every built VM attached to its tap with its hard-coded
-static IP, and prints the exact `ssh` command to reach each one using the key
-generated under testbed/vms/<hostname>/.
+device per VM, NATs that bridge out the host's uplink so the VMs have internet
+access on their static IPs, boots every built VM attached to its tap with its
+hard-coded static IP, and prints the exact `ssh` command to reach each one using
+the key generated under testbed/vms/<hostname>/.
 
 Every interface created here is torn down on exit - normal exit, Ctrl-C, or a
 kill signal - so no bridge or tap devices are ever left behind. The VMs are
@@ -41,6 +42,13 @@ def _print_access_banner(vms: list[dict]) -> None:
     print()
     print("=" * 72)
     print(" VMs are booting. Host bridge:", c.vm_config.HOST_BRIDGE_CIDR)
+    uplink = c.host_uplink_iface()
+    if uplink:
+        print(f" Internet: NATed out {uplink} (VMs reach the internet on their static IPs).")
+    else:
+        print(" Internet: no host default route found - VMs are LAN-only.")
+    print(" Each VM boots the weverywhere daemon (serve) at startup; run")
+    print(" `weverywhere netmap` on the host to print the fabric topology.")
     print(" (Static IPs take effect once each guest finishes booting.)")
     print()
     for vm in vms:
