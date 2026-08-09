@@ -7,6 +7,10 @@ pub async fn serve(args: &args::Args, multicast_group: args::MulticastAddressVec
   let local_config = config::Config::read_from_file(&args.config_path()).await.map_err(map_loc_err!())?;
   let executor = executor::Executor::new(&local_config).await;
 
+  // Make sure the host firewall actually lets us receive on this UDP port (unicast + multicast)
+  // before we start listening. Best-effort and never fatal - see firewall::ensure_inbound_udp_allowed.
+  firewall::ensure_inbound_udp_allowed(port).await;
+
   let mut tasks = tokio::task::JoinSet::new();
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_group.iter() {

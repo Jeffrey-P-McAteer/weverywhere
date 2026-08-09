@@ -12,6 +12,7 @@ mod embedded_programs;
 mod executor;
 mod universal_serde;
 mod net_utils;
+mod firewall;
 mod messages;
 mod crypto_utils;
 mod fs_utils;

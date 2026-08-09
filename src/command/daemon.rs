@@ -10,7 +10,14 @@ use super::*;
 /// unix / Administrator on Windows.
 pub async fn daemon(action: &DaemonAction, _args: &args::Args) -> DynResult<()> {
   match action {
-    DaemonAction::Install   => backend::install().await,
+    DaemonAction::Install   => {
+      backend::install().await?;
+      // The installed daemon runs `serve` (no --port), so open the host firewall for serve's
+      // default UDP port now, while we already hold the elevation `install` required. `serve` also
+      // re-ensures this at startup; doing it here means the node is reachable the moment it starts.
+      crate::firewall::ensure_inbound_udp_allowed(DEFAULT_SERVE_PORT).await;
+      Ok(())
+    }
     DaemonAction::Uninstall => backend::uninstall().await,
     DaemonAction::Start     => backend::start().await,
     DaemonAction::Stop      => backend::stop().await,
@@ -18,6 +25,11 @@ pub async fn daemon(action: &DaemonAction, _args: &args::Args) -> DynResult<()> 
     DaemonAction::Status    => backend::status().await,
   }
 }
+
+/// UDP port the installed daemon will `serve` on. Mirrors the `--port` default of the `Serve`
+/// subcommand in `args.rs`; `serve_args_vec()` deliberately passes no `--port`, so the daemon always
+/// uses this default - and this is therefore the port to open in the firewall at install time.
+const DEFAULT_SERVE_PORT: u16 = 2240;
 
 /// Absolute path to the currently running executable - this is what the daemon runs at boot.
 fn this_exe() -> DynResult<std::path::PathBuf> {

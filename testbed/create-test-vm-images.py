@@ -30,20 +30,56 @@ Usage (from the repo root):
     uv run testbed/create-test-vm-images.py                 # build all, as needed
     uv run testbed/create-test-vm-images.py win-test01      # only named VM(s)
     uv run testbed/create-test-vm-images.py --force         # rebuild even if current
+    uv run testbed/create-test-vm-images.py --jobs 2        # cap parallelism (default 8)
     uv run testbed/create-test-vm-images.py --prepare-only  # make ISOs/keys, don't boot
     uv run testbed/create-test-vm-images.py --debug         # watch install in a GTK window
+
+Installs run in parallel (up to --jobs at once) - safe because the install phase
+uses qemu user-mode networking (no shared host interfaces) and every output file
+is per-VM. Shared writes (the built binary, cached downloads) are locked.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import functools
 import subprocess
 import sys
+import threading
 import time
-import functools
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import _common as c
+
+
+class BuildError(Exception):
+    """A single VM failed to build. Raised (instead of sys.exit) so that parallel
+    workers surface the failure per-VM without tearing the whole process down."""
+
+
+# In-flight qemu install processes, so a Ctrl-C can kill them all promptly instead
+# of waiting on blocked proc.wait() calls in worker threads.
+_LIVE_PROCS: set[subprocess.Popen] = set()
+_LIVE_PROCS_LOCK = threading.Lock()
+
+
+def _register_proc(proc: subprocess.Popen) -> None:
+    with _LIVE_PROCS_LOCK:
+        _LIVE_PROCS.add(proc)
+
+
+def _unregister_proc(proc: subprocess.Popen) -> None:
+    with _LIVE_PROCS_LOCK:
+        _LIVE_PROCS.discard(proc)
+
+
+def _kill_all_live_procs() -> None:
+    with _LIVE_PROCS_LOCK:
+        procs = list(_LIVE_PROCS)
+    for proc in procs:
+        with contextlib.suppress(Exception):
+            proc.kill()
 
 def timed(func):
     @functools.wraps(func)
@@ -63,8 +99,8 @@ def timed(func):
 def build_linux(vm: dict, args) -> None:
     base_url = c.vm_config.IMAGE_SOURCES.get(vm["os"].lower())
     if not base_url:
-        sys.exit(f"[testbed] no image source for os={vm['os']!r}; "
-                 f"add one to IMAGE_SOURCES in vm_config.py")
+        raise BuildError(f"{vm['hostname']}: no image source for os={vm['os']!r}; "
+                         f"add one to IMAGE_SOURCES in vm_config.py")
 
     base = c.download(base_url, c.CACHE_DIR / base_url.rsplit("/", 1)[1])
 
@@ -75,7 +111,7 @@ def build_linux(vm: dict, args) -> None:
     c.run(["qemu-img", "convert", "-O", "qcow2", str(base), str(disk)])
     c.run(["qemu-img", "resize", str(disk), f"{c.vm_config.DISK_SIZE_GB}G"])
 
-    c.build_cloud_init_seed(vm, c.vm_dir(vm) / "seed.iso")
+    c.build_cloud_init_seed(vm, c.seed_iso_path(vm))
 
     if args.prepare_only:
         c.log(f"{vm['hostname']}: --prepare-only, skipping provisioning boot")
@@ -89,7 +125,7 @@ def build_linux(vm: dict, args) -> None:
 @timed
 def build_windows(vm: dict, args) -> None:
     # The config ISO and blank disk need no external ISO, so build them first.
-    c.build_windows_config(vm, c.vm_dir(vm) / "config.iso")
+    c.build_windows_config(vm, c.config_iso_path(vm))
 
     disk = c.disk_path(vm)
     disk.unlink(missing_ok=True)  # start from a clean disk on every (re)build
@@ -139,21 +175,67 @@ def _run_install_boot(vm: dict, args, *, timeout: int) -> None:
         c.log(f"{vm['hostname']}: --debug set, opening a qemu GTK window so you "
               "can watch the install")
     cmd = c.qemu_install_cmd(vm, disp=c.display_args(gui=args.debug))
-    c.log("qemu: " + " ".join(cmd))
+    c.log(f"{vm['hostname']}: qemu: " + " ".join(cmd))
     start = time.time()
     proc = subprocess.Popen(cmd)
+    _register_proc(proc)
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
-        sys.exit(f"[testbed] {vm['hostname']}: install did not finish within "
-                 f"{timeout}s. Check {c.vm_dir(vm) / 'serial.log'} and re-run "
-                 f"with --display to watch it.")
+        raise BuildError(
+            f"{vm['hostname']}: install did not finish within {timeout}s. "
+            f"Check {c.vm_dir(vm) / 'serial.log'} and re-run with --debug to watch it."
+        )
+    finally:
+        _unregister_proc(proc)
     if proc.returncode not in (0, None):
-        sys.exit(f"[testbed] {vm['hostname']}: qemu exited {proc.returncode} "
-                 f"during install.")
+        raise BuildError(
+            f"{vm['hostname']}: qemu exited {proc.returncode} during install."
+        )
     c.log(f"{vm['hostname']}: install finished in "
           f"{int(time.time() - start)}s")
+
+
+def _build_one(vm: dict, args) -> None:
+    """Build a single VM end to end. Runs in its own worker thread under --jobs.
+    Safe to run concurrently: install-phase networking is qemu user-mode (no shared
+    host interfaces), every output file is per-VM, and the only cross-VM shared
+    writes (binary build, cached downloads) are locked in _common.py."""
+    c.log(f"=== building {vm['hostname']} ({vm['os']}) ===")
+    c.ensure_ssh_key(vm)
+    if c.is_windows(vm):
+        build_windows(vm, args)
+    else:
+        build_linux(vm, args)
+    if not args.prepare_only:
+        c.write_manifest(vm)
+
+
+def _build_parallel(to_build: list[dict], args, jobs: int,
+                    built: list[str], failed: list[str]) -> None:
+    """Run _build_one across up to `jobs` worker threads, recording per-VM results.
+    A Ctrl-C kills the in-flight qemus and shuts the pool down without blocking on
+    them."""
+    ex = ThreadPoolExecutor(max_workers=min(jobs, len(to_build)))
+    futures = {ex.submit(_build_one, vm, args): vm for vm in to_build}
+    completed_cleanly = False
+    try:
+        for fut in as_completed(futures):
+            vm = futures[fut]
+            try:
+                fut.result()
+                built.append(vm["hostname"])
+            except Exception as e:  # noqa: BLE001 - report per-VM, keep others going
+                failed.append(vm["hostname"])
+                c.log(f"{vm['hostname']}: BUILD FAILED: {e}")
+        completed_cleanly = True
+    finally:
+        if not completed_cleanly:
+            # Interrupt / unexpected error: kill running qemus so the worker threads'
+            # proc.wait() returns, then shut down without waiting on them.
+            _kill_all_live_procs()
+        ex.shutdown(wait=completed_cleanly, cancel_futures=not completed_cleanly)
 
 
 @timed
@@ -164,6 +246,11 @@ def main() -> None:
                     help="rebuild even if inputs are unchanged")
     ap.add_argument("--prepare-only", action="store_true",
                     help="generate keys/seed/config ISOs but do not boot qemu")
+    ap.add_argument("--jobs", "-j", type=int, default=8,
+                    help="max VM installs to run in parallel (default: 8). Each "
+                         "install boots its own qemu on user-mode networking, so "
+                         "they don't share host interfaces; the practical ceiling is "
+                         "host RAM/CPU. Use --jobs 1 to build serially.")
     ap.add_argument("--debug", action="store_true",
                     help="diagnostic mode: open a qemu GTK window to watch/interact "
                          "with the install instead of running headless "
@@ -173,35 +260,57 @@ def main() -> None:
     vms = c.select_vms(args.vms)
     c.log(f"weverywhere version: {c.WEVERYWHERE_VERSION}")
 
-    built, skipped = [], []
+    # --- Prepare (serial) ---------------------------------------------------
+    # Stage everything shared BEFORE fanning out, so parallel workers never race on
+    # it: the per-platform binary build (baked into every image; also feeds
+    # build_hash) and the decision of which VMs actually need rebuilding.
+    to_build, skipped = [], []
     for vm in vms:
-        # The install bakes the weverywhere binary into the image, so make sure
-        # it exists - building it automatically if a matching versioned artifact
-        # is not already staged under dist/. Needed for --prepare-only too, since
-        # the seed/config ISOs embed the binary.
         c.ensure_weverywhere_binary(vm)
-
         if not args.force and not c.needs_rebuild(vm):
-            c.log(f"{vm['hostname']}: up to date, skipping "
-                  f"(use --force to rebuild)")
+            c.log(f"{vm['hostname']}: up to date, skipping (use --force to rebuild)")
             skipped.append(vm["hostname"])
-            continue
-
-        c.log(f"=== building {vm['hostname']} ({vm['os']}) ===")
-        c.ensure_ssh_key(vm)
-        if c.is_windows(vm):
-            build_windows(vm, args)
         else:
-            build_linux(vm, args)
+            to_build.append(vm)
 
-        if not args.prepare_only:
-            c.write_manifest(vm)
-        built.append(vm["hostname"])
+    if not to_build:
+        print()
+        c.log(f"done. built: none | skipped: {skipped or 'none'}")
+        return
+
+    # Windows installs need the (user-provided) ISO. Wait for it once, up front, so
+    # parallel workers don't each print the interactive prompt.
+    if not args.prepare_only and any(c.is_windows(vm) for vm in to_build):
+        _require_windows_iso(c.CACHE_DIR / c.vm_config.WINDOWS_ISO_NAME)
+
+    # --- Build (parallel) ---------------------------------------------------
+    jobs = max(1, args.jobs)
+    c.log(f"building {len(to_build)} VM(s) with up to {jobs} parallel job(s)")
+
+    built, failed = [], []
+    try:
+        if jobs == 1 or len(to_build) == 1:
+            for vm in to_build:
+                try:
+                    _build_one(vm, args)
+                    built.append(vm["hostname"])
+                except Exception as e:  # noqa: BLE001 - report per-VM, keep going
+                    failed.append(vm["hostname"])
+                    c.log(f"{vm['hostname']}: BUILD FAILED: {e}")
+        else:
+            _build_parallel(to_build, args, jobs, built, failed)
+    except KeyboardInterrupt:
+        _kill_all_live_procs()
+        sys.exit("[testbed] aborted; killed any in-flight qemu install(s).")
 
     print()
-    c.log(f"done. built: {built or 'none'} | skipped: {skipped or 'none'}")
+    c.log(f"done. built: {built or 'none'} | skipped: {skipped or 'none'} "
+          f"| failed: {failed or 'none'}")
     if built and not args.prepare_only:
         c.log("boot them with: uv run testbed/run-test-vm-network.py")
+    if failed:
+        sys.exit(f"[testbed] {len(failed)} VM(s) failed to build: "
+                 f"{', '.join(failed)}")
 
 
 if __name__ == "__main__":

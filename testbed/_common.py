@@ -41,6 +41,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from io import BytesIO
 from pathlib import Path
@@ -86,6 +87,26 @@ def run(cmd: list[str], *, sudo: bool = False, check: bool = True,
         capture_output=capture, text=True,
         cwd=str(cwd) if cwd else None,
     )
+
+
+# Process-wide named locks. When VM installs run in parallel (see --jobs) two
+# workers can end up wanting to write the SAME shared file - a cached download or
+# the freshly built weverywhere binary. Serialize those by resource key so only
+# the first writes and the rest see the finished file. Per-VM files (disks, seed
+# ISOs) need no lock: they live in distinct per-hostname paths.
+_FILE_LOCKS: dict[str, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def file_lock(key) -> threading.Lock:
+    """Return the process-wide lock for `key` (usually a path), creating it once."""
+    key = str(key)
+    with _FILE_LOCKS_GUARD:
+        lock = _FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _FILE_LOCKS[key] = lock
+        return lock
 
 
 def human_bytes(n: int) -> str:
@@ -200,17 +221,22 @@ def ensure_weverywhere_binary(vm: dict) -> Path:
     if binary.exists():
         return binary
 
-    plat = weverywhere_platform(vm)
-    log(f"{binary.name} not found; building it via scripts/build.py {plat} ...")
-    run(["uv", "run", str(REPO_ROOT / "scripts" / "build.py"), plat],
-        cwd=REPO_ROOT)
-    if not binary.exists():
-        sys.exit(
-            f"[testbed] scripts/build.py {plat} did not produce "
-            f"{binary.relative_to(REPO_ROOT)}.\n"
-            f"          Check the build output above."
-        )
-    log(f"built {binary.relative_to(REPO_ROOT)}")
+    # Two VMs of the same platform share one artifact; lock so only the first
+    # runs scripts/build.py (double-checked inside the lock) and the rest reuse it.
+    with file_lock(binary):
+        if binary.exists():
+            return binary
+        plat = weverywhere_platform(vm)
+        log(f"{binary.name} not found; building it via scripts/build.py {plat} ...")
+        run(["uv", "run", str(REPO_ROOT / "scripts" / "build.py"), plat],
+            cwd=REPO_ROOT)
+        if not binary.exists():
+            sys.exit(
+                f"[testbed] scripts/build.py {plat} did not produce "
+                f"{binary.relative_to(REPO_ROOT)}.\n"
+                f"          Check the build output above."
+            )
+        log(f"built {binary.relative_to(REPO_ROOT)}")
     return binary
 
 
@@ -313,14 +339,19 @@ def wait_for_ssh(vm: dict, timeout: int = 600) -> bool:
 
 def download(url: str, dest: Path) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.stat().st_size > 0:
-        log(f"using cached {dest.name} ({human_bytes(dest.stat().st_size)})")
-        return dest
-    tmp = dest.with_suffix(dest.suffix + ".partial")
-    log(f"downloading {url}\n            -> {dest.relative_to(REPO_ROOT)}")
-    # curl handles redirects, resume (-C -), and a live progress bar.
-    run(["curl", "-fL", "--retry", "3", "-C", "-", "-o", str(tmp), url])
-    tmp.rename(dest)
+    # Lock on the destination so parallel VM builds that need the same cached file
+    # (e.g. two Windows VMs sharing OpenSSH) don't race on the same .partial write;
+    # the losers re-check and find it already cached. Distinct files still download
+    # concurrently (different keys).
+    with file_lock(dest):
+        if dest.exists() and dest.stat().st_size > 0:
+            log(f"using cached {dest.name} ({human_bytes(dest.stat().st_size)})")
+            return dest
+        tmp = dest.with_suffix(dest.suffix + ".partial")
+        log(f"downloading {url}\n            -> {dest.relative_to(REPO_ROOT)}")
+        # curl handles redirects, resume (-C -), and a live progress bar.
+        run(["curl", "-fL", "--retry", "3", "-C", "-", "-o", str(tmp), url])
+        tmp.rename(dest)
     return dest
 
 
@@ -745,6 +776,18 @@ def disk_path(vm: dict) -> Path:
     return vm_dir(vm) / "disk.qcow2"
 
 
+def seed_iso_path(vm: dict) -> Path:
+    """Per-VM cloud-init seed ISO. The filename carries the hostname (on top of the
+    already per-hostname directory) so parallel builds can never collide on a shared
+    ISO path - the isolation is explicit rather than incidental."""
+    return vm_dir(vm) / f"seed-{vm['hostname']}.iso"
+
+
+def config_iso_path(vm: dict) -> Path:
+    """Per-VM Windows config ISO (autounattend + provisioning). See seed_iso_path."""
+    return vm_dir(vm) / f"config-{vm['hostname']}.iso"
+
+
 def needs_rebuild(vm: dict) -> bool:
     if not disk_path(vm).exists():
         return True
@@ -847,12 +890,12 @@ def qemu_install_cmd(vm: dict, *, disp: list[str]) -> list[str]:
     cmd += _nic_args(vm, _install_user_netdev())
     if is_windows(vm):
         win_iso = CACHE_DIR / vm_config.WINDOWS_ISO_NAME
-        cfg_iso = vm_dir(vm) / "config.iso"
+        cfg_iso = config_iso_path(vm)
         cmd += ["-drive", f"file={win_iso},media=cdrom,index=2,readonly=on"]
         cmd += ["-drive", f"file={cfg_iso},media=cdrom,index=3,readonly=on"]
         cmd += ["-boot", "once=d"]  # boot the install CD first time only
     else:
-        seed = vm_dir(vm) / "seed.iso"
+        seed = seed_iso_path(vm)
         cmd += ["-drive", f"file={seed},media=cdrom,index=2,readonly=on"]
     return cmd
 
