@@ -1,16 +1,14 @@
 
 use super::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 
-/// Shared collection point: for every responder socket address, the raw stdout bytes it sent back.
-/// Because the discovery program emits its whole report in a single `host::print`, one datagram
-/// per responder carries a complete report, so keying by source address cleanly separates nodes.
-type ReportMap = std::sync::Arc<tokio::sync::Mutex<HashMap<SocketAddr, Vec<u8>>>>;
-
-/// `weverywhere netmap` entry point: send the discovery program onto the fabric, gather the reports
-/// nodes send back, and print a trust-annotated tree. See readme "Network discovery".
+/// `weverywhere netmap` entry point: send the discovery program onto the fabric (multicast + every
+/// configured [[peer]]), collect the signed per-node records that relay back for a fixed window, and
+/// print a trust-annotated tree. Each node returns a signed attestation binding its hostname to its
+/// identity key, so the caller can prove every entry represents only itself. See readme "Network
+/// discovery" and `example-programs/network-map.c`.
 pub async fn netmap(
   args: &args::Args,
   program: Option<std::path::PathBuf>,
@@ -23,311 +21,311 @@ pub async fn netmap(
     tracing::info!("[ netmap ] discovery program: {}", program_label);
   }
 
-  // Sign the discovery program with our identity, exactly like `run` does, so servers can decide
-  // whether they trust us (which they then report back to us as the per-node trust marker).
   let local_config = config::Config::read_from_file(&args.config_path()).await.map_err(map_loc_err!())?;
   let source = config::IdentityData::generate_from_config(&local_config).await.map_err(map_loc_err!())?;
 
-  let pd = executor::ProgramDataBuilder::new()
-    .set_human_name(EMBEDDED_DISCOVERY_NAME.to_string())
-    .set_wasm_program_bytes(&wasm_bytes)
-    .set_source(&source)
-    .build().map_err(map_loc_err!())?;
+  // Our own identity pubkey: the tree root, and seeded into the visited-set so no node forwards back
+  // to us. Best-effort - if we have no key we use an empty root marker.
+  let our_pubkey = local_config.identity.read_public_key_ed25519_pem_file().await
+    .map(|vk| vk.as_bytes().to_vec())
+    .unwrap_or_default();
 
-  let execute_req = messages::NetworkMessage::ExecuteRequest { program_data: pd };
-  let execute_req_encoded = serde_bare::to_vec(&execute_req)?;
-
-  let reports: ReportMap = std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-
-  if local {
-    collect_from_local_daemon(&execute_req_encoded, port, reports.clone()).await?;
-  } else {
-    collect_from_fabric(&execute_req_encoded, &multicast_groups, &local_config.peer, port, reports.clone()).await?;
+  // Keys we trust (config [[trusted]] + our own): first-hop peers whose pinned key is in here get the
+  // deeper trusted forwarding budget.
+  let mut trusted: HashSet<Vec<u8>> = HashSet::new();
+  if !our_pubkey.is_empty() { trusted.insert(our_pubkey.clone()); }
+  for t in local_config.trusted.iter() {
+    if let Ok(vk) = crypto_utils::public_key_to_ed25519_vk(&t.key) {
+      trusted.insert(vk.as_bytes().to_vec());
+    }
   }
 
-  let reports = reports.lock().await;
-  print_network_graph(&source.human_name, &reports);
+  // One request UUID for this whole invocation; every node's records relay back tagged with it.
+  let request_uuid = discovery::random_uuid16();
+  let visited_init: Vec<Vec<u8>> = if our_pubkey.is_empty() { Vec::new() } else { vec![our_pubkey.clone()] };
 
+  // Collected records: raw (responder addr, cbor bytes) for replies carrying OUR request UUID.
+  let collected: std::sync::Arc<tokio::sync::Mutex<Vec<(SocketAddr, Vec<u8>)>>> =
+    std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+  // Build a per-target execute request (the depth budget differs by trust), encode + send.
+  let make_request = |depth: u8| -> DynResult<Vec<u8>> {
+    let pd = executor::ProgramDataBuilder::new()
+      .set_human_name(EMBEDDED_DISCOVERY_NAME.to_string())
+      .set_wasm_program_bytes(&wasm_bytes)
+      .set_source(&source)
+      .set_request_context(request_uuid, depth, visited_init.clone())
+      .build().map_err(map_loc_err!())?;
+    Ok(serde_bare::to_vec(&messages::NetworkMessage::ExecuteRequest { program_data: pd })?)
+  };
+
+  // Sockets we both send from and collect replies on (nodes reply to the address they were contacted
+  // from). One per family; the v6 socket is best-effort.
+  let sock_v4 = std::sync::Arc::new(tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await.map_err(map_loc_err!())?);
+  let sock_v6 = tokio::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).await.ok().map(std::sync::Arc::new);
+
+  // Start collectors before sending so nothing is missed.
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(12);
+  let mut collectors = tokio::task::JoinSet::new();
+  {
+    let sock = sock_v4.clone();
+    let collected = collected.clone();
+    collectors.spawn(async move { collect_until(&sock, request_uuid, deadline, collected).await; });
+  }
+  if let Some(sock6) = &sock_v6 {
+    let sock = sock6.clone();
+    let collected = collected.clone();
+    collectors.spawn(async move { collect_until(&sock, request_uuid, deadline, collected).await; });
+  }
+
+  if local {
+    // Only the local daemon: unicast to loopback with the untrusted budget (it's just us).
+    let req = make_request(discovery::UNTRUSTED_FORWARD_DEPTH)?;
+    let _ = sock_v4.send_to(&req, (std::net::Ipv4Addr::LOCALHOST, port)).await;
+  } else {
+    // Multicast to every group on every interface (untrusted budget - arbitrary hosts).
+    let mcast_req = make_request(discovery::UNTRUSTED_FORWARD_DEPTH)?;
+    for (_iface_idx, _iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
+      if iface_addrs.is_empty() { continue; }
+      for group in multicast_groups.iter() {
+        match group {
+          std::net::IpAddr::V4(g) => {
+            let _ = sock_v4.set_multicast_ttl_v4(4);
+            let _ = sock_v4.send_to(&mcast_req, (*g, port)).await;
+          }
+          std::net::IpAddr::V6(g) => {
+            if let Some(sock6) = &sock_v6 {
+              let _ = sock6.send_to(&mcast_req, (*g, port)).await;
+            }
+          }
+        }
+      }
+    }
+    // Unicast to every configured [[peer]] with a per-peer trust-based depth budget.
+    for peer in local_config.peer.iter() {
+      if let Some(addr) = net_utils::resolve_peer_addr(peer, port).await {
+        let peer_trusted = peer.expected_key_str()
+          .and_then(|s| crypto_utils::public_key_to_ed25519_vk(s).ok())
+          .map(|vk| trusted.contains(vk.as_bytes().as_slice()))
+          .unwrap_or(false);
+        let req = make_request(discovery::initial_depth_budget(peer_trusted))?;
+        match addr {
+          SocketAddr::V4(_) => { let _ = sock_v4.send_to(&req, addr).await; }
+          SocketAddr::V6(_) => { if let Some(sock6) = &sock_v6 { let _ = sock6.send_to(&req, addr).await; } }
+        }
+      }
+    }
+  }
+
+  // Wait out the 12s collection window.
+  collectors.join_all().await;
+
+  let replies = collected.lock().await;
+  print_network_map(&source.human_name, &our_pubkey, &replies);
   Ok(())
 }
 
 /// The stem of the bundled discovery program (see example-programs/embedded.list + network-map.c).
 const EMBEDDED_DISCOVERY_NAME: &str = "network-map";
 
-/// On-disk location of the compiled discovery program, used only as a last-resort dev fallback when
-/// nothing is embedded (e.g. zig was missing at build time).
+/// On-disk location of the compiled discovery program, used only as a last-resort dev fallback.
 fn default_program_path() -> std::path::PathBuf {
   std::path::PathBuf::from("target").join("example-programs").join(format!("{EMBEDDED_DISCOVERY_NAME}.wasm"))
 }
 
-/// Resolve which discovery program bytes to send, in precedence order:
-///   1. an explicit `--program <FILE>` override (always wins);
-///   2. the program embedded in this binary at build time (the normal, file-free path);
-///   3. the compiled example on disk (dev convenience when nothing was embedded).
-/// Returns the bytes plus a short human label describing where they came from.
+/// Resolve which discovery program bytes to send: explicit `--program`, else the embedded program,
+/// else the on-disk compiled example. Returns the bytes plus a short label describing the source.
 async fn resolve_discovery_program(program: Option<std::path::PathBuf>) -> DynResult<(Vec<u8>, String)> {
-  // 1. Explicit override.
   if let Some(path) = program {
     match tokio::fs::read(&path).await {
       Ok(bytes) => return Ok((bytes, format!("override file {}", path.display()))),
       Err(e) => return Err(format!("Could not read --program {:?} ({})", path, e).into()),
     }
   }
-
-  // 2. Embedded bytes — the whole point: a moved binary needs no external .wasm.
   if let Some(bytes) = crate::embedded_programs::get(EMBEDDED_DISCOVERY_NAME) {
     return Ok((bytes.to_vec(), format!("embedded '{EMBEDDED_DISCOVERY_NAME}'")));
   }
-
-  // 3. Dev fallback: the on-disk compiled example.
   let fallback = default_program_path();
   match tokio::fs::read(&fallback).await {
     Ok(bytes) => Ok((bytes, format!("on-disk {}", fallback.display()))),
     Err(e) => Err(format!(
       "No discovery program available: this binary has no embedded '{EMBEDDED_DISCOVERY_NAME}' and \
-       {:?} could not be read ({}).\n\
-       Build the binary with zig installed to embed it, run \
-       `uv run scripts/compile-example-programs.py` to produce the on-disk copy, \
-       or pass your own with `weverywhere netmap --program <FILE.wasm>`.",
+       {:?} could not be read ({}). Build with zig to embed it, run \
+       `uv run scripts/compile-example-programs.py`, or pass `--program <FILE.wasm>`.",
       fallback, e
     ).into()),
   }
 }
 
-/// --local path: fire the discovery program at the daemon on 127.0.0.1 and collect its reply.
-async fn collect_from_local_daemon(req: &[u8], port: u16, reports: ReportMap) -> DynResult<()> {
-  let sock = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await.map_err(map_loc_err!())?;
-  sock.send_to(req, (std::net::Ipv4Addr::LOCALHOST, port)).await.map_err(map_loc_err!())?;
-  collect_replies(&sock, reports).await
-}
-
-/// Default path: send the discovery program to every multicast group on every interface AND to every
-/// statically-configured `[[peer]]`, each on its own socket/task, and merge the replies into the
-/// shared report map. Peers are treated exactly like multicast targets - same request, same reply
-/// collection - so nodes multicast can't reach still appear on the map.
-async fn collect_from_fabric(req: &[u8], multicast_groups: &args::MulticastAddressVec, peers: &[config::PeerMetadata], port: u16, reports: ReportMap) -> DynResult<()> {
-  let mut tasks = tokio::task::JoinSet::new();
-
-  for peer in peers.iter() {
-    let req = req.to_vec();
-    let peer = peer.clone();
-    let reports = reports.clone();
-    tasks.spawn(async move {
-      if let Err(e) = netmap_one_peer(&req, &peer, port, reports).await {
-        tracing::warn!("[ netmap ] Error sending to peer [{}]: {:?}", peer.label(), e);
-      }
-    });
-  }
-
-  for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
-    for multicast_addr in multicast_groups.iter() {
-      if iface_addrs.len() < 1 {
-        // No addresses => treat as no network connection and skip the interface.
-        continue;
-      }
-      let req = req.to_vec();
-      let iface_name = iface_name.clone();
-      let iface_addrs = iface_addrs.clone();
-      let multicast_addr = multicast_addr.clone();
-      let reports = reports.clone();
-      tasks.spawn(async move {
-        if let Err(e) = fabric_one_iface(&req, iface_idx, &iface_addrs, &multicast_addr, port, reports).await {
-          if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-            if io_err.kind() == std::io::ErrorKind::AddrInUse {
-              return; // Expected for some ipv6 link-local addresses; not worth warning about.
-            }
-          }
-          tracing::warn!("[ netmap ] Error on iface {:?} group {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
-        }
-      });
-    }
-  }
-  tasks.join_all().await;
-  Ok(())
-}
-
-/// Send the discovery program to one multicast group on one interface, then collect replies that
-/// arrive back on the same ephemeral socket.
-async fn fabric_one_iface(req: &[u8], iface_idx: u32, iface_addrs: &Vec<std::net::IpAddr>, multicast_group: &std::net::IpAddr, port: u16, reports: ReportMap) -> DynResult<()> {
-  let empty_bind_addr_port = if multicast_group.is_ipv4() {
-    (std::net::IpAddr::V4(core::net::Ipv4Addr::new(0, 0, 0, 0)), 0)
-  } else {
-    (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), 0)
-  };
-
-  let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await.map_err(map_loc_err!())?;
-
-  if multicast_group.is_ipv4() {
-    sock.set_multicast_loop_v4(true).map_err(map_loc_err!())?;
-    sock.set_multicast_ttl_v4(4).map_err(map_loc_err!())?; // A few hops; matches `run`/`serve`.
-  } else {
-    sock.set_multicast_loop_v6(true).map_err(map_loc_err!())?;
-  }
-
-  match multicast_group {
-    std::net::IpAddr::V4(multicast_group) => {
-      for iface_addr in iface_addrs.iter() {
-        if let std::net::IpAddr::V4(iface_addr_v4) = iface_addr {
-          sock.join_multicast_v4(*multicast_group, *iface_addr_v4).map_err(map_loc_err!())?;
-        }
-      }
-    }
-    std::net::IpAddr::V6(multicast_group) => {
-      sock.join_multicast_v6(multicast_group, iface_idx).map_err(map_loc_err!())?;
-    }
-  }
-
-  sock.send_to(req, (*multicast_group, port)).await.map_err(map_loc_err!())?;
-
-  collect_replies(&sock, reports).await
-}
-
-/// Unicast the discovery program to one configured `[[peer]]`, then collect replies that arrive back
-/// on the same ephemeral socket. Mirrors `fabric_one_iface` but for a static peer: the target address
-/// is chosen in preference order (hostname, then ipv6, then ipv4) and the socket family matches it.
-async fn netmap_one_peer(req: &[u8], peer: &config::PeerMetadata, port: u16, reports: ReportMap) -> DynResult<()> {
-  let target = match net_utils::resolve_peer_addr(peer, port).await {
-    Some(t) => t,
-    None => return Err(format!("no resolvable address for peer [{}]", peer.label()).into()),
-  };
-
-  let bind_addr = if target.is_ipv4() {
-    (std::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED), 0)
-  } else {
-    (std::net::IpAddr::V6(core::net::Ipv6Addr::UNSPECIFIED), 0)
-  };
-  let sock = tokio::net::UdpSocket::bind(bind_addr).await.map_err(map_loc_err!())?;
-
-  sock.send_to(req, target).await.map_err(map_loc_err!())?;
-
-  collect_replies(&sock, reports).await
-}
-
-/// Read datagrams for a short window, accumulating any forwarded stdout bytes per responder. The
-/// window auto-extends whenever we actually hear something, so slow responders still get counted.
-async fn collect_replies(sock: &tokio::net::UdpSocket, reports: ReportMap) -> DynResult<()> {
-  let td = tokio::time::Duration::from_millis(150);
+/// Read `BasicReturnMap` replies carrying `request_uuid` off `sock` until `deadline`, appending each
+/// (responder addr, cbor bytes) to `collected`.
+async fn collect_until(
+  sock: &tokio::net::UdpSocket,
+  request_uuid: [u8; 16],
+  deadline: tokio::time::Instant,
+  collected: std::sync::Arc<tokio::sync::Mutex<Vec<(SocketAddr, Vec<u8>)>>>,
+) {
   let mut buf = [0u8; 64 * 1024];
-  let mut remaining_checks: usize = 20; // ~3s baseline before any replies extend it
-
-  while remaining_checks > 0 {
-    remaining_checks -= 1;
-    match tokio::time::timeout(td, sock.recv_from(&mut buf)).await {
-      Ok(Ok((len, addr))) => {
-        #[allow(unreachable_patterns)]
-        match serde_bare::from_slice::<messages::NetworkMessage>(&buf[..len]) {
-          Ok(messages::NetworkMessage::BasicInsecureProgramStdout { stdout_data, .. }) => {
-            remaining_checks += 6; // heard something; keep listening a little longer
-            let mut map = reports.lock().await;
-            // One datagram carries a node's whole report. The same node can answer on
-            // both the multicast and the [[peer]] path (its reply source is the same
-            // server addr:port either way), so keep the first complete report per
-            // responder and ignore repeats rather than concatenating duplicates.
-            map.entry(addr).or_insert_with(|| stdout_data.to_vec());
-          }
-          Ok(_other) => { /* program-exit and friends aren't part of the map */ }
-          Err(e) => {
-            tracing::warn!("[ netmap ] parse error from {:?}: {e}", addr);
+  loop {
+    let now = tokio::time::Instant::now();
+    if now >= deadline { break; }
+    match tokio::time::timeout(deadline - now, sock.recv_from(&mut buf)).await {
+      Ok(Ok((len, from))) => {
+        if let Ok(messages::NetworkMessage::BasicReturnMap { request_uuid: ru, cbor_data, .. }) =
+          serde_bare::from_slice::<messages::NetworkMessage>(&buf[..len])
+        {
+          if ru == request_uuid {
+            collected.lock().await.push((from, cbor_data));
           }
         }
       }
-      Ok(Err(e)) => tracing::warn!("[ netmap ] socket error: {e}"),
-      Err(_) => { /* 150ms tick with no data */ }
+      Ok(Err(_)) => break,
+      Err(_) => break, // deadline reached
     }
   }
-  Ok(())
 }
 
-/// One responding node's parsed report.
-#[derive(Default)]
-struct NodeReport {
-  hostname: Option<String>,
-  trusts_you: bool,
-  peers: Vec<PeerLine>,
+/// One node in the assembled map.
+struct Node {
+  pubkey: Vec<u8>,
+  hostname: String,
+  parent: Vec<u8>,
+  trusts_caller: bool,
+  responder: SocketAddr,
+  sig_valid: bool,
+  time_ok: bool,
 }
 
-/// One neighbour line inside a node's report.
-struct PeerLine {
-  name: String,
-  addr: String,
-  trusted_by_node: bool,
-  pubkey_hex: String,
+/// Decode a per-node record CBOR map into its fields (attestation bytes + parent + trusts_caller).
+fn parse_record(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>, bool)> {
+  use serde_cbor::Value;
+  let map = match serde_cbor::from_slice::<Value>(bytes).ok()? {
+    Value::Map(m) => m,
+    _ => return None,
+  };
+  let attestation = match map.get(&Value::Integer(discovery::record_keys::ATTESTATION)) {
+    Some(Value::Bytes(b)) => b.clone(),
+    _ => return None,
+  };
+  let parent = match map.get(&Value::Integer(discovery::record_keys::PARENT_PUBKEY)) {
+    Some(Value::Bytes(b)) => b.clone(),
+    _ => Vec::new(),
+  };
+  let trusts_caller = matches!(
+    map.get(&Value::Integer(discovery::record_keys::TRUSTS_CALLER)),
+    Some(Value::Integer(1))
+  );
+  Some((attestation, parent, trusts_caller))
 }
 
-/// Parse the tab-separated lines the discovery program prints (see example-programs/network-map.c).
-///   NODE\t<hostname>\t<trusts_you 0/1>
-///   PEER\t<name>\t<addr>\t<trusted 0/1>\t<pubkey_hex>
-fn parse_node(bytes: &[u8]) -> NodeReport {
-  let text = String::from_utf8_lossy(bytes);
-  let mut node = NodeReport::default();
-  for line in text.lines() {
-    let mut f = line.split('\t');
-    match f.next() {
-      Some("NODE") => {
-        node.hostname = f.next().map(|s| s.to_string());
-        node.trusts_you = f.next().map(|s| s.trim() == "1").unwrap_or(false);
-      }
-      Some("PEER") => {
-        node.peers.push(PeerLine {
-          name: f.next().unwrap_or("").to_string(),
-          addr: f.next().unwrap_or("").to_string(),
-          trusted_by_node: f.next().map(|s| s == "1").unwrap_or(false),
-          pubkey_hex: f.next().unwrap_or("").to_string(),
+/// Verify + assemble the collected records into a tree and print it. Verifies each node's signature
+/// (warning on failure) and that its timestamp is within the request window, dedups by identity
+/// pubkey (never printing a node twice), and links children to parents by pubkey.
+fn print_network_map(you: &str, our_pubkey: &[u8], replies: &[(SocketAddr, Vec<u8>)]) {
+  let now = sys_utils::epoch_seconds_now_utc0();
+  let mut nodes: HashMap<Vec<u8>, Node> = HashMap::new();
+
+  for (responder, cbor) in replies {
+    let (attestation, parent, trusts_caller) = match parse_record(cbor) {
+      Some(v) => v,
+      None => continue,
+    };
+    match discovery::verify_attestation_cbor(&attestation) {
+      Ok(vn) => {
+        let time_ok = discovery::attestation_time_ok(vn.epoch_s, now);
+        if !time_ok {
+          eprintln!("[netmap] WARNING: {} ({}) attestation timestamp is outside the +/-30s window",
+                    vn.hostname, responder);
+        }
+        // Dedup by identity pubkey: never re-print the same node.
+        nodes.entry(vn.pubkey.clone()).or_insert(Node {
+          pubkey: vn.pubkey,
+          hostname: vn.hostname,
+          parent,
+          trusts_caller,
+          responder: *responder,
+          sig_valid: true,
+          time_ok,
         });
       }
-      _ => { /* ignore blank / unknown lines for forward-compatibility */ }
+      Err(e) => {
+        eprintln!("[netmap] WARNING: invalid signature from {} - {} (node not trusted for identity)",
+                  responder, e);
+      }
     }
   }
-  node
-}
 
-/// Render the collected reports as a tree rooted at "you", annotating each node with whether it
-/// trusts you and each neighbour with whether that node trusts the neighbour.
-fn print_network_graph(you: &str, reports: &HashMap<SocketAddr, Vec<u8>>) {
   println!();
   println!("weverywhere network map");
   println!("  you = {}", you);
-  println!("  legend:  <3 = this host trusts you    x = this host does NOT trust you");
+  println!("  legend:  <3 = node trusts you    x = node does NOT trust you    (!) = unverified/expired");
   println!();
 
-  if reports.is_empty() {
+  if nodes.is_empty() {
     println!("(no servers responded)");
     println!("  - is a daemon running and reachable? try:  weverywhere netmap --local");
-    println!("  - was the discovery program built?         uv run scripts/compile-example-programs.py");
+    println!("  - are peers configured, and did the discovery program get built?");
     println!();
     return;
   }
 
+  // children[parent_pubkey] = [child pubkeys], sorted for stable output.
+  let mut children: HashMap<Vec<u8>, Vec<Vec<u8>>> = HashMap::new();
+  for (pk, node) in nodes.iter() {
+    children.entry(node.parent.clone()).or_default().push(pk.clone());
+  }
+  for v in children.values_mut() {
+    v.sort_by(|a, b| {
+      let na = nodes.get(a).map(|n| n.hostname.as_str()).unwrap_or("");
+      let nb = nodes.get(b).map(|n| n.hostname.as_str()).unwrap_or("");
+      na.cmp(nb)
+    });
+  }
+
   println!("(you) {}", you);
+  // Roots are nodes whose parent is us (or whose parent we never heard from).
+  let mut roots: Vec<Vec<u8>> = nodes.keys()
+    .filter(|pk| {
+      let parent = &nodes[*pk].parent;
+      parent == our_pubkey || !nodes.contains_key(parent)
+    })
+    .cloned()
+    .collect();
+  roots.sort_by(|a, b| nodes[a].hostname.cmp(&nodes[b].hostname));
 
-  // Stable output ordering regardless of arrival order.
-  let mut entries: Vec<(&SocketAddr, &Vec<u8>)> = reports.iter().collect();
-  entries.sort_by_key(|(addr, _)| addr.to_string());
-
-  let node_count = entries.len();
-  for (i, (addr, bytes)) in entries.into_iter().enumerate() {
-    let node = parse_node(bytes);
-    let is_last_node = i + 1 == node_count;
-    let (branch, child_indent) = if is_last_node { ("`--", "    ") } else { ("|--", "|   ") };
-
-    let host = node.hostname.unwrap_or_else(|| "<unknown>".to_string());
-    let trust_mark = if node.trusts_you { "<3" } else { "x" };
-    println!("{} {} @ {}   [{}]", branch, host, addr, trust_mark);
-
-    if node.peers.is_empty() {
-      println!("{}`-- (no peers observed yet)", child_indent);
-      continue;
-    }
-
-    let peer_count = node.peers.len();
-    for (j, peer) in node.peers.iter().enumerate() {
-      let is_last_peer = j + 1 == peer_count;
-      let peer_branch = if is_last_peer { "`--" } else { "|--" };
-      let trust = if peer.trusted_by_node { "trusted" } else { "untrusted" };
-      let name = if peer.name.is_empty() { "<anon>" } else { peer.name.as_str() };
-      let short_key: String = peer.pubkey_hex.chars().take(8).collect();
-      println!("{}{} peer: {} @ {}  [{}]  key:{}", child_indent, peer_branch, name, peer.addr, trust, short_key);
-    }
+  let mut printed: HashSet<Vec<u8>> = HashSet::new();
+  let root_count = roots.len();
+  for (i, pk) in roots.iter().enumerate() {
+    print_subtree(pk, &nodes, &children, "", i + 1 == root_count, &mut printed);
   }
   println!();
+}
+
+/// Recursively print one node and its children with box-drawing indentation, guarding against cycles
+/// via `printed` (a node reached by two paths is only shown once).
+fn print_subtree(
+  pk: &[u8],
+  nodes: &HashMap<Vec<u8>, Node>,
+  children: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
+  prefix: &str,
+  is_last: bool,
+  printed: &mut HashSet<Vec<u8>>,
+) {
+  let node = match nodes.get(pk) { Some(n) => n, None => return };
+  if !printed.insert(pk.to_vec()) {
+    return; // already printed via another path
+  }
+  let branch = if is_last { "`--" } else { "|--" };
+  let trust_mark = if node.trusts_caller { "<3" } else { "x" };
+  let warn = if node.sig_valid && node.time_ok { "" } else { " (!)" };
+  println!("{}{} {} @ {}   [{}]{}", prefix, branch, node.hostname, node.responder, trust_mark, warn);
+
+  let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "|   " });
+  if let Some(kids) = children.get(pk) {
+    let kids: Vec<&Vec<u8>> = kids.iter().filter(|k| !printed.contains(*k)).collect();
+    let n = kids.len();
+    for (i, child) in kids.into_iter().enumerate() {
+      print_subtree(child, nodes, children, &child_prefix, i + 1 == n, printed);
+    }
+  }
 }

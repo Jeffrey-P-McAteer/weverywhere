@@ -13,11 +13,15 @@ mod executor;
 mod universal_serde;
 mod net_utils;
 mod firewall;
+mod discovery;
 mod messages;
 mod crypto_utils;
 mod fs_utils;
 mod sys_utils;
 mod err_utils;
+
+#[cfg(test)]
+mod tests;
 
 fn main() {
     use clap::Parser;

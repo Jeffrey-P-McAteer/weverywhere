@@ -50,6 +50,27 @@ pub struct Executor {
 
   startup_handle: tokio::task::JoinHandle<()>, // Used to confirm that any async start-up tasks have completed
 
+  /// This node's own ed25519 signing key, loaded once from config.identity.keyfile. Used to sign the
+  /// per-node attestation surfaced to programs via `host::signed_attestation`. None if the keyfile is
+  /// missing (the node still serves, it just can't produce signed attestations).
+  identity_signing_key: Option<ed25519_dalek::SigningKey>,
+
+  /// Raw bytes of this node's identity public key (empty if no key). Doubles as this node's stable
+  /// identity for the discovery visited-set.
+  identity_pubkey: Vec<u8>,
+
+  /// A freshly-signed identity for THIS node, reused as the `source` when the daemon forwards a
+  /// discovery program onward (so each hop's `trusts_me` reflects the real parent). None if no key.
+  identity_data: Option<config::IdentityData>,
+}
+
+/// A slot the discovery host functions write into and the serve loop reads after the program exits:
+/// the node's own CBOR record (`host::return_map`) and the UUID it wants used for onward forwarding
+/// (`host::set_forward_uuid`).
+#[derive(Debug, Default, Clone)]
+pub struct ExecReturn {
+  pub map: Option<Vec<u8>>,
+  pub forward_uuid: Option<[u8; 16]>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -67,6 +88,22 @@ pub struct ProgramData {
   /// The following fields are hashed in order: all fields of source, human_name, wasm_program_bytes
   pub signature: Vec<u8>,
 
+  // ---- Recursive-discovery request context (defaults are inert for a normal `run`) ----
+  /// Correlates replies to a query session. The origin picks a random UUID; each hop that forwards
+  /// generates its own and rewrites replies back to its caller's UUID as they relay up.
+  #[serde(default)]
+  pub request_uuid: [u8; 16],
+
+  /// How many more hops this program may be forwarded from the node that receives it. 0 = do not
+  /// recurse (the node still executes and reports itself). Set from the trust-based budget in
+  /// `crate::discovery`.
+  #[serde(default)]
+  pub depth_budget: u8,
+
+  /// Identity public keys already on the path from the origin to here. A node skips any peer whose
+  /// key is in this set (loop prevention) and appends its own key before forwarding.
+  #[serde(default)]
+  pub visited: Vec<Vec<u8>>,
 }
 
 impl ProgramData {
@@ -95,6 +132,9 @@ pub struct ProgramDataBuilder {
   human_name: String,
   wasm_program_bytes: Vec<u8>,
   signature: Vec<u8>,
+  request_uuid: [u8; 16],
+  depth_budget: u8,
+  visited: Vec<Vec<u8>>,
 }
 
 impl ProgramDataBuilder {
@@ -104,7 +144,18 @@ impl ProgramDataBuilder {
       human_name: "UNSET_NAME".to_string(),
       wasm_program_bytes: Vec::with_capacity(4096),
       signature: Vec::with_capacity(1024),
+      request_uuid: [0u8; 16],
+      depth_budget: 0,
+      visited: Vec::new(),
     }
+  }
+  /// Set the discovery request context (UUID + how many hops it may still be forwarded + the set of
+  /// identity keys already visited). Inert for a normal `run` (defaults: zero UUID, depth 0, empty).
+  pub fn set_request_context(mut self, request_uuid: [u8; 16], depth_budget: u8, visited: Vec<Vec<u8>>) -> Self {
+    self.request_uuid = request_uuid;
+    self.depth_budget = depth_budget;
+    self.visited = visited;
+    self
   }
   pub fn set_source(mut self, source: &config::IdentityData) -> Self {
     self.source = Some(source.clone());
@@ -131,6 +182,9 @@ impl ProgramDataBuilder {
         human_name: self.human_name,
         wasm_program_bytes: self.wasm_program_bytes,
         signature: self.signature,
+        request_uuid: self.request_uuid,
+        depth_budget: self.depth_budget,
+        visited: self.visited,
       })
     }
     else {
@@ -172,6 +226,19 @@ pub struct RPStoreData {
   /// `name\taddr\ttrusted(0/1)\tpubkey_hex`. Snapshotting avoids sharing the live [`Executor`] into
   /// wasmtime callbacks and gives the program a stable view for the duration of its run.
   pub peer_reports: Vec<String>,
+
+  // ---- Discovery per-exec context (snapshotted from the inbound ProgramData) ----
+  /// This node's own signing key (for `host::signed_attestation`); None if we have no identity key.
+  pub signing_key: Option<ed25519_dalek::SigningKey>,
+  /// This node's identity pubkey bytes (goes into the attestation).
+  pub our_pubkey: Vec<u8>,
+  /// The caller's identity pubkey (this node's parent in the discovery tree).
+  pub caller_pubkey: Vec<u8>,
+  /// Hop distance from the origin (== inbound visited length; origin's direct responders are 1).
+  pub depth: u32,
+  /// Where discovery host functions deposit the node's CBOR record + onward-forwarding UUID for the
+  /// serve loop to pick up after the program exits.
+  pub return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>,
 }
 
 unsafe impl Send for RPStoreData { } // TODO audit me
@@ -183,6 +250,14 @@ impl Executor {
     let config = config.clone();
     // Resolve our hostname once, up front (new_cyclic's closure is synchronous).
     let hostname = get_hostname().await;
+    // Load our identity key material once, up front, for signing node attestations and for signing
+    // the `source` on forwarded discovery requests. Missing keyfile => None (node still serves).
+    let identity_signing_key = crypto_utils::read_private_key_ed25519_pem_file(&config.identity.keyfile).await.ok();
+    let identity_pubkey = identity_signing_key
+      .as_ref()
+      .map(|k| k.verifying_key().as_bytes().to_vec())
+      .unwrap_or_default();
+    let identity_data = config::IdentityData::generate_from_config(&config).await.ok();
     std::sync::Arc::new_cyclic(move |weak_ref| {
         // Upgrade inside the task
         let event_loop_weak_ref = weak_ref.clone();
@@ -270,6 +345,10 @@ impl Executor {
             event_loop_handle: event_loop_handle,
 
             startup_handle: startup_handle,
+
+            identity_signing_key: identity_signing_key,
+            identity_pubkey: identity_pubkey,
+            identity_data: identity_data,
         }
     })
   }
@@ -299,6 +378,28 @@ impl Executor {
     self.trusted_keys.insert(name.as_ref().into(), key.clone());
   }
 
+  /// True if `pubkey` (raw ed25519 bytes) is in our trusted-keys set. Used to pick the trusted vs
+  /// untrusted forwarding depth for a peer.
+  pub fn trusts_pubkey(&self, pubkey: &[u8]) -> bool {
+    self.trusted_keys.iter().any(|kv| kv.value().as_bytes() == pubkey)
+  }
+
+  /// This node's identity public key bytes (empty if no keyfile). The discovery visited-set key.
+  pub fn identity_pubkey(&self) -> Vec<u8> {
+    self.identity_pubkey.clone()
+  }
+
+  /// A signed identity for THIS node to use as the `source` of forwarded discovery requests.
+  pub fn identity_data(&self) -> Option<config::IdentityData> {
+    self.identity_data.clone()
+  }
+
+  /// Snapshot of passively-observed neighbours as (last address, identity pubkey) - forwarding
+  /// targets for recursive discovery, alongside the statically-configured `[[peer]]` list.
+  pub fn observed_targets(&self) -> Vec<(std::net::SocketAddr, Vec<u8>)> {
+    self.peers.iter().map(|kv| (kv.value().last_addr, kv.value().pubkey.clone())).collect()
+  }
+
   /// Record (or refresh) a neighbour we just heard from on the fabric. This is intentionally
   /// passive observation, NOT a discovery protocol: we simply remember the signed identity that
   /// arrived on an inbound request so that later discovery *programs* can enumerate our neighbours
@@ -314,7 +415,7 @@ impl Executor {
     });
   }
 
-  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder) -> DynResult<u64> {
+  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -333,7 +434,7 @@ impl Executor {
       }
     }
 
-    self.create_pid(program, is_trusted, stdio_forwarder).await
+    self.create_pid(program, is_trusted, stdio_forwarder, return_slot).await
   }
 
   fn create_next_pid(&self) -> u64 {
@@ -347,7 +448,7 @@ impl Executor {
     Ok(())
   }
 
-  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder) -> DynResult<u64> {
+  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
     let this_program_pid = self.create_next_pid();
 
@@ -401,6 +502,11 @@ impl Executor {
       wasi_p1_ctx: wasi_ctx,
       hostname: hostname_snapshot,
       peer_reports: peer_reports_snapshot,
+      signing_key: self.identity_signing_key.clone(),
+      our_pubkey: self.identity_pubkey.clone(),
+      caller_pubkey: program.source.encoded_public_key.clone(),
+      depth: program.visited.len() as u32,
+      return_slot: return_slot,
     };
 
     { // Self-referential magic, now we can place the value in .store
@@ -509,6 +615,24 @@ impl Executor {
           },
       ).map_err(map_loc_err!())?;
 
+      // host::random(ptr, len) -> bytes_written. Fill [ptr, ptr+len) in guest memory with
+      // cryptographically secure random bytes from the OS CSPRNG. Programs use this to seed things
+      // like the per-hop request UUID in network-map (a WASI module has no entropy source of its
+      // own). Returns the number of bytes written (== len unless the buffer overruns guest memory).
+      linker.func_wrap_async(
+          "host",
+          "random",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, len): (i32, i32)| {
+            Box::new(async move {
+              use rand::RngCore;
+              let n = len.max(0) as usize;
+              let mut buf = vec![0u8; n];
+              rand::rngs::OsRng.fill_bytes(&mut buf);
+              write_guest_bytes(&mut caller, ptr, len, &buf)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
       // host::peer_count() -> n. Number of neighbours this executor has passively observed and can
       // report via host::peer_report.
       linker.func_wrap_async(
@@ -533,6 +657,97 @@ impl Executor {
                 Some(s) => write_guest_bytes(&mut caller, ptr, cap, s.as_bytes()),
                 None => Ok(-1i32),
               }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::caller_pubkey(ptr, cap) -> n. Writes the identity pubkey of the caller that sent us
+      // this program (this node's parent in the discovery tree) into guest memory.
+      linker.func_wrap_async(
+          "host",
+          "caller_pubkey",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, cap): (i32, i32)| {
+            Box::new(async move {
+              let bytes = caller.data().caller_pubkey.clone();
+              write_guest_bytes(&mut caller, ptr, cap, &bytes)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::depth() -> i32. This node's hop distance from the origin (origin's direct responders
+      // report depth 1). Lets the program annotate its record so the client can render the tree.
+      linker.func_wrap_async(
+          "host",
+          "depth",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move { Ok(caller.data().depth as i32) })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::signed_attestation(ptr, cap) -> bytes_written (or -1 if this node has no identity key).
+      // Builds a CBOR attestation {hostname, pubkey, epoch, signature} signed by this node's identity
+      // key over the canonical bytes in crate::discovery. This is what proves to the caller that the
+      // record came from this node and no other.
+      linker.func_wrap_async(
+          "host",
+          "signed_attestation",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, cap): (i32, i32)| {
+            Box::new(async move {
+              let cbor = {
+                let d = caller.data();
+                match &d.signing_key {
+                  Some(sk) => {
+                    use ed25519_dalek::Signer;
+                    let epoch = sys_utils::epoch_seconds_now_utc0();
+                    let msg = crate::discovery::attestation_signing_bytes(&d.hostname, &d.our_pubkey, epoch);
+                    let sig = sk.sign(&msg).to_bytes().to_vec();
+                    crate::discovery::build_attestation_cbor(&d.hostname, &d.our_pubkey, epoch, &sig).ok()
+                  }
+                  None => None,
+                }
+              };
+              match cbor {
+                Some(bytes) => write_guest_bytes(&mut caller, ptr, cap, &bytes),
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::return_map(ptr, len) -> 0. Hands the program's CBOR node-record to the daemon, which
+      // sends it to the caller as a BasicReturnMap after the program exits. (The richer companion to
+      // host::print, which only forwards raw stdout.)
+      linker.func_wrap_async(
+          "host",
+          "return_map",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, len): (i32, i32)| {
+            Box::new(async move {
+              let bytes = read_guest_bytes(&mut caller, ptr, len)?;
+              if let Ok(mut slot) = caller.data().return_slot.lock() {
+                slot.map = Some(bytes);
+              }
+              Ok(0i32)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::set_forward_uuid(ptr, len). Tells the daemon which UUID to stamp on the sub-requests it
+      // forwards to this node's peers. The program seeds this from host::random, so a fresh random
+      // UUID is generated per hop (and rewritten back to the caller's UUID as replies relay up).
+      linker.func_wrap_async(
+          "host",
+          "set_forward_uuid",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, len): (i32, i32)| {
+            Box::new(async move {
+              let bytes = read_guest_bytes(&mut caller, ptr, len)?;
+              if bytes.len() == 16 {
+                let mut uuid = [0u8; 16];
+                uuid.copy_from_slice(&bytes);
+                if let Ok(mut slot) = caller.data().return_slot.lock() {
+                  slot.forward_uuid = Some(uuid);
+                }
+              }
+              Ok(0i32)
             })
           },
       ).map_err(map_loc_err!())?;
@@ -680,6 +895,23 @@ fn write_guest_bytes(caller: &mut wasmtime::Caller<'_, RPStoreData>, ptr: i32, c
     .ok_or(wasmtime::Trap::MemoryOutOfBounds)?;
   dst.copy_from_slice(&src[..n]);
   Ok(n as i32)
+}
+
+/// Read `len` bytes from a running program's linear memory at `ptr`. Shared by the `host::return_map`
+/// / `host::set_forward_uuid` imports. Traps if the module has no `memory` export or the range is out
+/// of bounds.
+fn read_guest_bytes(caller: &mut wasmtime::Caller<'_, RPStoreData>, ptr: i32, len: i32) -> wasmtime::Result<Vec<u8>> {
+  let memory = match caller.get_export("memory") {
+    Some(wasmtime::Extern::Memory(mem)) => mem,
+    _ => return Err(wasmtime::Trap::MemoryOutOfBounds.into()),
+  };
+  let start = ptr.max(0) as usize;
+  let n = len.max(0) as usize;
+  let data = memory
+    .data(&*caller)
+    .get(start..start + n)
+    .ok_or(wasmtime::Trap::MemoryOutOfBounds)?;
+  Ok(data.to_vec())
 }
 
 /// Lowercase hex encoding, used to key peers by their public key and to render keys for programs.

@@ -26,7 +26,8 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
 
   let executor = executor::Executor::new(&local_config).await;
 
-  match executor.begin_exec(&pd, executor::wasi_adapters::WasiStdioSimpleForwarder::new_nop() ).await {
+  let return_slot = std::sync::Arc::new(std::sync::Mutex::new(executor::ExecReturn::default()));
+  match executor.begin_exec(&pd, executor::wasi_adapters::WasiStdioSimpleForwarder::new_nop(), return_slot ).await {
     Ok(running_pid) => {
       if crate::v_is_info() {
         tracing::info!("Spawned PID {}", running_pid);

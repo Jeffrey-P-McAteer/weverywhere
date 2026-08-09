@@ -185,7 +185,20 @@ def guest_config_toml(vm: dict) -> str:
     populated by `generate-missing-keys` so the node trusts itself across reboots.
     The keyfile is a TOML *literal* (single-quoted) string so Windows backslashes
     need no escaping.
+    The `[[peer]]` cross-links list every OTHER testbed VM by static IP, so each daemon knows the
+    rest of the fabric and `weverywhere netmap` can walk a real multi-hop tree (host -> VM_A -> VM_B)
+    instead of stopping at whoever it directly contacted. No `expected_key` is pinned, so these edges
+    count as untrusted (the recursive forwarding depth stays conservative).
     """
+    peer_blocks = ""
+    for other in all_vms():
+        if other["hostname"] == vm["hostname"]:
+            continue
+        peer_blocks += (
+            f"\n[[peer]]\n"
+            f"hostname = \"{other['hostname']}\"\n"
+            f"ipv4 = \"{static_ip(other).ip}\"\n"
+        )
     return f"""[identity]
 name = "{vm['hostname']}"
 keyfile = '{guest_identity_keyfile(vm)}'
@@ -197,7 +210,7 @@ max_memory_bytes = 4611686018427387904
 [limits.untrusted]
 max_cpu_instructions = 65536
 max_memory_bytes = 65536
-"""
+{peer_blocks}"""
 
 
 def host_weverywhere_binary(vm: dict) -> Path:

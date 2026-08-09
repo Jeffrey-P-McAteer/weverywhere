@@ -144,15 +144,5 @@ pub async fn read_public_key_ed25519_pem_file<P: AsRef<std::path::Path>>(keyfile
 }
 
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sign_bytes_with_file() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
-}
 
 
