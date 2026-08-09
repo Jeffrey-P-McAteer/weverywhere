@@ -20,14 +20,15 @@ path = "/etc/weverywhere.d/*.toml"
 
 
 # Statically-configured peer nodes to send execution programs to, in addition to
-# multicast discovery. Used by both the client and the server. This block may be
-# duplicated (one [[peers]] per peer). Each peer MUST set at least one of
-# `hostname`, `ipv4`, or `ipv6`; when connecting we try them in the order
+# multicast discovery. Every [[peer]] is contacted (unicast) alongside the
+# multicast groups in all send/receive operations (run --fabric, netmap). This
+# block may be duplicated (one [[peer]] per peer). Each peer MUST set at least one
+# of `hostname`, `ipv4`, or `ipv6`; when connecting we try them in the order
 # hostname -> ipv6 -> ipv4. `expected_key` optionally pins the server's public
 # key (same `ssh-ed25519 <base64>` form as [[trusted]]). If it is omitted, the
 # first time we reach the peer we log the key it advertised as a ready-to-paste
-# [[peers]] block so you can pin it.
-# [[peers]]
+# [[peer]] block so you can pin it.
+# [[peer]]
 # hostname = "node1.example.lan"
 # ipv6 = "fe80::1"
 # ipv4 = "10.0.0.1"

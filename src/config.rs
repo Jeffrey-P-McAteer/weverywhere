@@ -19,11 +19,11 @@ pub struct Config {
   pub includes: Vec<SingleInclude>,
 
   /// An initial, statically-configured network of peer nodes to send execution
-  /// programs to, in addition to multicast discovery. Used by both the client
-  /// (unicast targets) and the server (peers to relay/announce to). See
+  /// programs to, in addition to multicast discovery. Each `[[peer]]` entry is
+  /// used alongside the multicast groups in every send/receive operation. See
   /// [`PeerMetadata`].
   #[serde(default)]
-  pub peers: Vec<PeerMetadata>,
+  pub peer: Vec<PeerMetadata>,
 
   #[serde(default)]
   pub limits: Limits,
@@ -68,7 +68,7 @@ pub struct SingleStartupProgram {
 }
 
 
-/// One statically-configured peer node in `[[peers]]`. It is addressed by any
+/// One statically-configured peer node in `[[peer]]`. It is addressed by any
 /// combination of a DNS `hostname`, an `ipv4` address, and an `ipv6` address -
 /// at least one of the three MUST be set (enforced at deserialize time). The
 /// `ipv4`/`ipv6` values are parsed as real addresses; `hostname` is any string
@@ -95,7 +95,7 @@ pub struct PeerMetadata {
   pub expected_key: Option<SingleTrustedKey>,
 }
 
-/// Wire form of a `[[peers]]` entry. `PeerMetadata` is `#[serde(try_from)]` this
+/// Wire form of a `[[peer]]` entry. `PeerMetadata` is `#[serde(try_from)]` this
 /// so we can (a) parse `ipv4`/`ipv6` as real addresses via their own Deserialize
 /// impls and (b) enforce that at least one address form is present, normalising a
 /// blank `hostname` to "unset".
@@ -122,7 +122,7 @@ impl TryFrom<PeerMetadataToml> for PeerMetadata {
     });
     if hostname.is_none() && raw.ipv4.is_none() && raw.ipv6.is_none() {
       return Err(
-        "each [[peers]] entry must set at least one of `hostname`, `ipv4`, or `ipv6`"
+        "each [[peer]] entry must set at least one of `hostname`, `ipv4`, or `ipv6`"
           .to_string(),
       );
     }
@@ -140,7 +140,7 @@ impl TryFrom<PeerMetadataToml> for PeerMetadata {
 // `Ipv4Addr`/`Ipv6Addr`, which the crate does not implement `Optionable` for, so we
 // cannot derive it. Instead we treat a peer as an atomic leaf (its `Optioned` is
 // itself), exactly like the crate does for `String`/primitives. The config merge
-// (`fancy_omerge_vec`) already concatenates `[[peers]]` across include files, so
+// (`fancy_omerge_vec`) already concatenates `[[peer]]` across include files, so
 // per-field optionality inside a peer would add nothing.
 impl optionable::Optionable for PeerMetadata {
   type Optioned = Self;
@@ -194,11 +194,11 @@ impl PeerMetadata {
     self.expected_key.as_ref().map(|k| k.key.as_str())
   }
 
-  /// A ready-to-paste `[[peers]]` TOML block for this peer that pins
+  /// A ready-to-paste `[[peer]]` TOML block for this peer that pins
   /// `observed_key`. The peer is identified by whichever of hostname/ipv6/ipv4 it
   /// was configured with (same fields, same preference order).
   pub fn to_pinned_toml(&self, observed_key: &str) -> String {
-    let mut s = String::from("[[peers]]\n");
+    let mut s = String::from("[[peer]]\n");
     if let Some(h) = self.hostname.as_deref() {
       s.push_str(&format!("hostname = {}\n", toml_basic_string(h)));
     }
@@ -217,8 +217,8 @@ impl PeerMetadata {
 
   /// Warning to log the first time we reach a peer that has no `expected_key`
   /// pinned: it surfaces the key the server actually advertised and shows the
-  /// exact TOML to paste to pin it. `observed_key` is the OpenSSH-form public key
-  /// string the server advertised (see `crypto_utils::format_public_key`).
+  /// exact `[[peer]]` TOML to paste to pin it. `observed_key` is the OpenSSH-form
+  /// public key string the server advertised (see `crypto_utils::format_public_key`).
   pub fn unpinned_key_warning(&self, observed_key: &str) -> String {
     format!(
       "peer [{}] has no expected_key set; it advertised the key below. If you \
@@ -231,7 +231,7 @@ impl PeerMetadata {
 
 /// Render `s` as a TOML basic (double-quoted) string, escaping the characters
 /// TOML requires. Inputs here (hostnames, IPs, ssh key strings) are normally
-/// plain, but this keeps generated `[[peers]]` blocks valid regardless.
+/// plain, but this keeps generated `[[peer]]` blocks valid regardless.
 fn toml_basic_string(s: &str) -> String {
   let mut out = String::with_capacity(s.len() + 2);
   out.push('"');
@@ -430,7 +430,7 @@ async fn process_config_override_file(config: &Config, override_file_path: &std:
     trusted: fancy_omerge_vec(config_o.trusted, override_data.trusted)?,
     startup_program: fancy_omerge_vec(config_o.startup_program, override_data.startup_program)?,
     includes: fancy_omerge_vec(config_o.includes, override_data.includes)?,
-    peers: fancy_omerge_vec(config_o.peers, override_data.peers)?,
+    peer: fancy_omerge_vec(config_o.peer, override_data.peer)?,
     limits: Some(LimitsOpt { // Oh god -_- at least it's read-once config data.
       trusted: Some(fancy_omerge(config_o.limits.clone().unwrap_or_else(|| Default::default()).trusted, override_data.limits.clone().unwrap_or_else(|| Default::default()).trusted)?.unwrap_or_else(|| Default::default())),
       untrusted: Some(fancy_omerge(config_o.limits.clone().unwrap_or_else(|| Default::default()).untrusted, override_data.limits.clone().unwrap_or_else(|| Default::default()).untrusted)?.unwrap_or_else(|| Default::default())),
@@ -506,7 +506,7 @@ mod peer_tests {
         name = "t"
         keyfile = "/tmp/x.pem"
 
-        [[peers]]
+        [[peer]]
         hostname = "node1.example"
         ipv6 = "fe80::1"
         ipv4 = "10.0.0.1"
@@ -515,8 +515,8 @@ mod peer_tests {
     )
     .expect("valid config");
 
-    assert_eq!(cfg.peers.len(), 1);
-    let p = &cfg.peers[0];
+    assert_eq!(cfg.peer.len(), 1);
+    let p = &cfg.peer[0];
     assert_eq!(p.hostname.as_deref(), Some("node1.example"));
     assert_eq!(p.ipv6, Some("fe80::1".parse().unwrap()));
     assert_eq!(p.ipv4, Some("10.0.0.1".parse().unwrap()));
@@ -561,15 +561,16 @@ mod peer_tests {
     .unwrap();
     let block = p.to_pinned_toml("ssh-ed25519 AAAAOBSERVED");
     // The generated block names the peer by its set fields and pins the key...
+    assert!(block.starts_with("[[peer]]\n"));
     assert!(block.contains("hostname = \"node1\""));
     assert!(block.contains("ipv4 = \"10.0.0.9\""));
     assert!(block.contains("expected_key = { key = \"ssh-ed25519 AAAAOBSERVED\" }"));
     assert!(!block.contains("ipv6"));
-    // ...and it parses straight back into a Config as a valid [[peers]] entry.
+    // ...and it parses straight back into a Config as a valid [[peer]] entry.
     let cfg: Config = toml::from_str(&format!(
       "[identity]\nname=\"t\"\nkeyfile=\"/tmp/x.pem\"\n\n{block}"
     ))
-    .expect("generated [[peers]] block should be valid TOML");
-    assert_eq!(cfg.peers[0].expected_key_str(), Some("ssh-ed25519 AAAAOBSERVED"));
+    .expect("generated [[peer]] block should be valid TOML");
+    assert_eq!(cfg.peer[0].expected_key_str(), Some("ssh-ed25519 AAAAOBSERVED"));
   }
 }

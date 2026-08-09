@@ -42,7 +42,7 @@ pub async fn netmap(
   if local {
     collect_from_local_daemon(&execute_req_encoded, port, reports.clone()).await?;
   } else {
-    collect_from_fabric(&execute_req_encoded, &multicast_groups, port, reports.clone()).await?;
+    collect_from_fabric(&execute_req_encoded, &multicast_groups, &local_config.peer, port, reports.clone()).await?;
   }
 
   let reports = reports.lock().await;
@@ -101,10 +101,24 @@ async fn collect_from_local_daemon(req: &[u8], port: u16, reports: ReportMap) ->
   collect_replies(&sock, reports).await
 }
 
-/// Default path: broadcast the discovery program to every multicast group on every interface, each
-/// on its own socket/task, and merge the replies into the shared report map.
-async fn collect_from_fabric(req: &[u8], multicast_groups: &args::MulticastAddressVec, port: u16, reports: ReportMap) -> DynResult<()> {
+/// Default path: send the discovery program to every multicast group on every interface AND to every
+/// statically-configured `[[peer]]`, each on its own socket/task, and merge the replies into the
+/// shared report map. Peers are treated exactly like multicast targets - same request, same reply
+/// collection - so nodes multicast can't reach still appear on the map.
+async fn collect_from_fabric(req: &[u8], multicast_groups: &args::MulticastAddressVec, peers: &[config::PeerMetadata], port: u16, reports: ReportMap) -> DynResult<()> {
   let mut tasks = tokio::task::JoinSet::new();
+
+  for peer in peers.iter() {
+    let req = req.to_vec();
+    let peer = peer.clone();
+    let reports = reports.clone();
+    tasks.spawn(async move {
+      if let Err(e) = netmap_one_peer(&req, &peer, port, reports).await {
+        tracing::warn!("[ netmap ] Error sending to peer [{}]: {:?}", peer.label(), e);
+      }
+    });
+  }
+
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_groups.iter() {
       if iface_addrs.len() < 1 {
@@ -168,6 +182,27 @@ async fn fabric_one_iface(req: &[u8], iface_idx: u32, iface_addrs: &Vec<std::net
   collect_replies(&sock, reports).await
 }
 
+/// Unicast the discovery program to one configured `[[peer]]`, then collect replies that arrive back
+/// on the same ephemeral socket. Mirrors `fabric_one_iface` but for a static peer: the target address
+/// is chosen in preference order (hostname, then ipv6, then ipv4) and the socket family matches it.
+async fn netmap_one_peer(req: &[u8], peer: &config::PeerMetadata, port: u16, reports: ReportMap) -> DynResult<()> {
+  let target = match net_utils::resolve_peer_addr(peer, port).await {
+    Some(t) => t,
+    None => return Err(format!("no resolvable address for peer [{}]", peer.label()).into()),
+  };
+
+  let bind_addr = if target.is_ipv4() {
+    (std::net::IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED), 0)
+  } else {
+    (std::net::IpAddr::V6(core::net::Ipv6Addr::UNSPECIFIED), 0)
+  };
+  let sock = tokio::net::UdpSocket::bind(bind_addr).await.map_err(map_loc_err!())?;
+
+  sock.send_to(req, target).await.map_err(map_loc_err!())?;
+
+  collect_replies(&sock, reports).await
+}
+
 /// Read datagrams for a short window, accumulating any forwarded stdout bytes per responder. The
 /// window auto-extends whenever we actually hear something, so slow responders still get counted.
 async fn collect_replies(sock: &tokio::net::UdpSocket, reports: ReportMap) -> DynResult<()> {
@@ -184,7 +219,11 @@ async fn collect_replies(sock: &tokio::net::UdpSocket, reports: ReportMap) -> Dy
           Ok(messages::NetworkMessage::BasicInsecureProgramStdout { stdout_data, .. }) => {
             remaining_checks += 6; // heard something; keep listening a little longer
             let mut map = reports.lock().await;
-            map.entry(addr).or_default().extend_from_slice(&stdout_data);
+            // One datagram carries a node's whole report. The same node can answer on
+            // both the multicast and the [[peer]] path (its reply source is the same
+            // server addr:port either way), so keep the first complete report per
+            // responder and ignore repeats rather than concatenating duplicates.
+            map.entry(addr).or_insert_with(|| stdout_data.to_vec());
           }
           Ok(_other) => { /* program-exit and friends aren't part of the map */ }
           Err(e) => {

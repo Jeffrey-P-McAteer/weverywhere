@@ -32,8 +32,22 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool
     return send_to_local_daemon(&execute_req_encoded, port).await;
   }
 
-  // Step 2b (--fabric): transmit to all multicast groups on all interfaces
+  // Step 2b (--fabric): transmit to all multicast groups on all interfaces, AND to
+  // every statically-configured [[peer]] (unicast). Peers are treated just like the
+  // multicast targets - sent the same request, replies collected the same way - so
+  // nodes that multicast can't reach are still covered.
   let mut tasks = tokio::task::JoinSet::new();
+
+  for peer in local_config.peer.iter() {
+    let execute_req_encoded = execute_req_encoded.clone();
+    let peer = peer.clone();
+    tasks.spawn(async move {
+      if let Err(e) = run_one_peer(&execute_req_encoded, &peer, port).await {
+        tracing::warn!("[ run ] Error sending to peer [{}]: {:?}", peer.label(), e);
+      }
+    });
+  }
+
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_groups.iter() {
       if iface_addrs.len() < 1 {
@@ -154,6 +168,30 @@ pub async fn run_one_iface(ex_req_bytes: &[u8], pd: &executor::ProgramData, ifac
   }
 
   Ok(())
+}
+
+/// Unicast an encoded execute request to one configured `[[peer]]` and print its replies, exactly
+/// like the local-daemon path. The peer's address is chosen in preference order (hostname, then
+/// ipv6, then ipv4); the reply socket is bound to the matching address family.
+pub async fn run_one_peer(ex_req_bytes: &[u8], peer: &config::PeerMetadata, port: u16) -> DynResult<()> {
+  let target = match net_utils::resolve_peer_addr(peer, port).await {
+    Some(t) => t,
+    None => return Err(format!("no resolvable address for peer [{}]", peer.label()).into()),
+  };
+
+  let bind_addr = if target.is_ipv4() {
+    (std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+  } else {
+    (std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+  };
+  let sock = tokio::net::UdpSocket::bind(bind_addr).await.map_err(map_loc_err!())?;
+
+  let len = sock.send_to(ex_req_bytes, target).await.map_err(map_loc_err!())?;
+  if crate::v_is_info() {
+    tracing::warn!("Sent {} bytes to peer [{}] at {}", len, peer.label(), target);
+  }
+
+  read_daemon_replies(&sock).await
 }
 
 /// Default client path: send an encoded execute request to the local daemon over loopback, then
