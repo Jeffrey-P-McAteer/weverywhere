@@ -130,6 +130,31 @@ pub enum Command {
 
     },
 
+    /// Discover the weverywhere fabric and draw a trust-annotated map of it. This sends a WASI
+    /// discovery *program* to every reachable server (the whole multicast fabric by default, or
+    /// only the local daemon with --local), collects the hostname + observed peers each server
+    /// reports back, and prints the resulting network as a tree. Discovery is deliberately a
+    /// program, not a wire message, so richer topology/telemetry can ship as different programs.
+    Netmap {
+        /// Path to the discovery WASI program. Defaults to the compiled network-map example
+        /// (target/example-programs/network-map.wasm); build it with
+        /// `uv run scripts/compile-example-programs.py`.
+        #[arg(long)]
+        program: Option<std::path::PathBuf>,
+
+        /// Query only the local daemon on this machine instead of the whole multicast fabric.
+        #[arg(short, long, default_value_t = false)]
+        local: bool,
+
+        /// UDP Multicast addresses to send the discovery program to
+        #[arg(short, long, default_value_t = default_multicast_groups() )]
+        multicast_groups: MulticastAddressVec,
+
+        /// UDP port the daemon listens on
+        #[arg(short, long, default_value_t = 2240)]
+        port: u16,
+    },
+
     /// Manage weverywhere as a long-running background daemon (OS service) that runs `serve`.
     /// Uses the native service manager on each platform: systemd on Linux, launchd on macOS,
     /// and the Task Scheduler on Windows. Most actions must run as root / Administrator.

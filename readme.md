@@ -7,7 +7,7 @@ It supports the following capabilities:
 
  - [ ] List metadata about WASI binaries which you own/have as a file on your machine
  - [ ] List metadata about your current network(s), to include:
-    - [ ] What other machines are running `weverywhere` daemons?
+    - [x] What other machines are running `weverywhere` daemons? (see **Network discovery** below — `weverywhere netmap`)
     - [ ] What Libraries\*/Services\* are exposed by the machines on these networks?
  - [ ] Run a `weverywhere` Daemon which performs the following tasks:
     - [ ] Reads a configuration file allowing the host to specify: (likely `/etc/weverywhere/weverywhere.conf` and a /etc/weverywhere/weverywhere.d/\*.conf` included directory)
@@ -103,6 +103,57 @@ Pass `--fabric` to instead broadcast the request to the multicast fabric (the wh
 ```bash
 weverywhere run --fabric ./program.wasi
 ```
+
+# Network discovery
+
+`weverywhere` has **no dedicated "who is out there" wire message**, and deliberately so. Discovery
+is performed by *sending a program* onto the fabric — the same mechanism as any other work. This
+keeps the wire protocol minimal and means future topology/telemetry needs can ship as different
+programs without a protocol change.
+
+```bash
+# Draw a trust-annotated map of the whole multicast fabric:
+weverywhere netmap
+
+# Only ask the daemon on this machine (no LAN traffic):
+weverywhere netmap --local
+
+# Use your own discovery/observation program instead of the bundled one:
+weverywhere netmap --program ./my-topology-probe.wasi
+```
+
+How it works:
+
+1. `netmap` signs and broadcasts the discovery program (`example-programs/network-map.c`, compiled
+   to `target/example-programs/network-map.wasm`) to the fabric. Multicast delivers it to every
+   reachable Executor at once — that is the "jump to all servers".
+2. Each Executor runs the program, which calls host imports to report what it knows *locally*:
+    - `host::hostname(ptr, cap)` — the node's OS hostname.
+    - `host::trusts_me()` — whether that node trusts **you** (the caller's signing key).
+    - `host::peer_count()` / `host::peer_report(i, ptr, cap)` — the neighbours that node has
+      **passively observed** (identities seen on inbound fabric traffic), each tagged with whether
+      that node trusts the peer. This is observation, not a discovery protocol: Executors simply
+      remember who has talked to them (see `Executor::note_peer`).
+3. Each node prints one tab-separated report, which is forwarded back over the normal stdout path.
+   `netmap` collects every report and renders a tree, annotating each node with `<3` (this host
+   trusts you) or `x` (it does not), and each neighbour with `trusted` / `untrusted`.
+
+Example:
+
+```
+weverywhere network map
+  you = my-laptop
+  legend:  <3 = this host trusts you    x = this host does NOT trust you
+
+(you) my-laptop
+|-- fileserver @ 192.168.1.10:2240   [<3]
+|   `-- peer: my-laptop @ 192.168.1.5:41888  [trusted]  key:e680d5c4
+`-- guest-pi @ 192.168.1.23:2240   [x]
+    `-- peer: my-laptop @ 192.168.1.5:41888  [untrusted]  key:e680d5c4
+```
+
+To design a richer view (services exposed, load, RAM, multi-hop forwarding, ...), write a different
+WASI program and hand it to `netmap --program` — no changes to `weverywhere` itself are required.
 
 # Project-level Missing Pieces and TODOs
 

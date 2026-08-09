@@ -30,6 +30,16 @@ pub struct Executor {
 
   trusted_keys: dashmap::DashMap<String, ed25519_dalek::VerifyingKey>,
 
+  /// This host's OS hostname, resolved once at construction. Exposed to WASI programs via the
+  /// `host::hostname` import so discovery/observation programs can label the node they run on.
+  hostname: String,
+
+  /// Passively-observed registry of other identities seen on the fabric. We record the source of
+  /// every inbound program request here (keyed by hex(pubkey)); this is NOT a discovery protocol,
+  /// merely a memory of who has talked to us, exposed to WASI programs via `host::peer_*` so that
+  /// a discovery program can report this node's neighbours. See readme "Network discovery".
+  peers: dashmap::DashMap<String, PeerInfo>,
+
   /// Efficient OS primitive to wake up a ton of .await-ers.
   /// This one is fired every time a PID exits. The exit code may be found in pid_last_exit_code until a new process
   /// with the same PID is launched, at which point the code will be 0 until the process exits.
@@ -61,6 +71,23 @@ pub struct ProgramData {
 
 impl ProgramData {
 
+}
+
+/// A single passively-observed neighbour on the fabric. Populated by [`Executor::note_peer`] from
+/// the signed identity carried on inbound requests, and surfaced to WASI programs (one formatted
+/// line per peer) through the `host::peer_report` import.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+  /// Untrusted self-declared human name from the peer's identity.
+  pub human_name: String,
+  /// Raw ed25519 public key bytes; doubles as this peer's stable identity.
+  pub pubkey: Vec<u8>,
+  /// The socket address we last received traffic from for this identity.
+  pub last_addr: std::net::SocketAddr,
+  /// Whether WE (this executor) trust the peer's key (present in our trusted-keys set).
+  pub trusted: bool,
+  /// Seconds since the UTC epoch when we last heard from this peer.
+  pub last_seen_epoch_s: u64,
 }
 
 pub struct ProgramDataBuilder {
@@ -138,6 +165,13 @@ pub struct RPStoreData {
   pub max_instructions: u64,
   //pub wasi_p1_ctx: std::sync::Arc<tokio::sync::RwLock<wasmtime_wasi::p1::WasiP1Ctx>>,
   pub wasi_p1_ctx: wasmtime_wasi::p1::WasiP1Ctx,
+
+  /// This host's name, snapshotted for the `host::hostname` import (see [`Executor::hostname`]).
+  pub hostname: String,
+  /// Pre-formatted peer lines snapshotted at spawn time for the `host::peer_report` import. Each is
+  /// `name\taddr\ttrusted(0/1)\tpubkey_hex`. Snapshotting avoids sharing the live [`Executor`] into
+  /// wasmtime callbacks and gives the program a stable view for the duration of its run.
+  pub peer_reports: Vec<String>,
 }
 
 unsafe impl Send for RPStoreData { } // TODO audit me
@@ -147,7 +181,9 @@ unsafe impl Sync for RPStoreData { } // TODO audit me
 impl Executor {
   pub async fn new(config: &config::Config) -> std::sync::Arc<Executor> {
     let config = config.clone();
-    std::sync::Arc::new_cyclic(|weak_ref| {
+    // Resolve our hostname once, up front (new_cyclic's closure is synchronous).
+    let hostname = get_hostname().await;
+    std::sync::Arc::new_cyclic(move |weak_ref| {
         // Upgrade inside the task
         let event_loop_weak_ref = weak_ref.clone();
         let event_loop_handle = tokio::spawn(async move {
@@ -223,6 +259,11 @@ impl Executor {
             // We expect fewer writes to these during run-time, so we lower the shard amount to reduce overhead
             trusted_keys: dashmap::DashMap::with_capacity_and_shard_amount(256, 8),
 
+            hostname: hostname,
+            // Peers accumulate slowly (one entry per distinct identity we hear from), so a small
+            // shard count is plenty.
+            peers: dashmap::DashMap::with_capacity_and_shard_amount(256, 8),
+
             pid_exit_signal: tokio::sync::Notify::new(),
             running_programs_insert_signal: tokio::sync::Notify::new(),
 
@@ -256,6 +297,21 @@ impl Executor {
 
   pub fn add_trusted_key<S: AsRef<str>>(&self, name: S, key: &ed25519_dalek::VerifyingKey) {
     self.trusted_keys.insert(name.as_ref().into(), key.clone());
+  }
+
+  /// Record (or refresh) a neighbour we just heard from on the fabric. This is intentionally
+  /// passive observation, NOT a discovery protocol: we simply remember the signed identity that
+  /// arrived on an inbound request so that later discovery *programs* can enumerate our neighbours
+  /// via the `host::peer_*` imports. Keyed by hex(pubkey) so repeated contact updates in place.
+  pub fn note_peer(&self, addr: std::net::SocketAddr, source: &config::IdentityData) {
+    let trusted = self.trusted_keys.iter().any(|kv| source.encoded_public_key == kv.value().as_bytes());
+    self.peers.insert(to_hex(&source.encoded_public_key), PeerInfo {
+      human_name: source.human_name.clone(),
+      pubkey: source.encoded_public_key.clone(),
+      last_addr: addr,
+      trusted: trusted,
+      last_seen_epoch_s: sys_utils::epoch_seconds_now_utc0(),
+    });
   }
 
   pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder) -> DynResult<u64> {
@@ -299,6 +355,13 @@ impl Executor {
 
     stdio_forwarder.set_pid(this_program_pid); // Claim this PID - todo look at timeout stuff, we should not allow these to alias new processes
 
+    // Snapshot host + peer facts for the WASI host:: imports so callbacks don't need the live Executor.
+    let hostname_snapshot = self.hostname.clone();
+    let peer_reports_snapshot: Vec<String> = self.peers.iter().map(|kv| {
+      let p = kv.value();
+      format!("{}\t{}\t{}\t{}", p.human_name, p.last_addr, if p.trusted { 1 } else { 0 }, to_hex(&p.pubkey))
+    }).collect();
+
     let mut config = wasmtime::Config::new();
     config.consume_fuel(true); // Enable fuel tracking for instruction counting
     config.async_support(true); // Affects APIs available
@@ -336,6 +399,8 @@ impl Executor {
       max_instructions: 16 * 1024, // todo
       //wasi_p1_ctx: std::sync::Arc::new(tokio::sync::RwLock::new(wasi_ctx)),
       wasi_p1_ctx: wasi_ctx,
+      hostname: hostname_snapshot,
+      peer_reports: peer_reports_snapshot,
     };
 
     { // Self-referential magic, now we can place the value in .store
@@ -428,6 +493,48 @@ impl Executor {
               Ok(0 as i32) // False == 0
             }
           }),
+      ).map_err(map_loc_err!())?;
+
+      // host::hostname(ptr, cap) -> bytes_written. Copies this executor's hostname into guest
+      // memory (up to `cap` bytes) and returns how many bytes were written. Lets a program label
+      // the node it is currently executing on.
+      linker.func_wrap_async(
+          "host",
+          "hostname",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, cap): (i32, i32)| {
+            Box::new(async move {
+              let bytes = caller.data().hostname.clone().into_bytes();
+              write_guest_bytes(&mut caller, ptr, cap, &bytes)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::peer_count() -> n. Number of neighbours this executor has passively observed and can
+      // report via host::peer_report.
+      linker.func_wrap_async(
+          "host",
+          "peer_count",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move {
+              Ok(caller.data().peer_reports.len() as i32)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::peer_report(index, ptr, cap) -> bytes_written (or -1 if index is out of range).
+      // Writes one tab-separated record `name\taddr\ttrusted(0/1)\tpubkey_hex` for peer `index`.
+      linker.func_wrap_async(
+          "host",
+          "peer_report",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (index, ptr, cap): (i32, i32, i32)| {
+            Box::new(async move {
+              let line = caller.data().peer_reports.get(index as usize).cloned();
+              match line {
+                Some(s) => write_guest_bytes(&mut caller, ptr, cap, s.as_bytes()),
+                None => Ok(-1i32),
+              }
+            })
+          },
       ).map_err(map_loc_err!())?;
 
       *write_lock.linker.write().await = Some(linker);
@@ -554,6 +661,46 @@ impl Executor {
     Ok( self.pid_last_exit_code.get(&pid).map(|r| *r.value() ).unwrap_or(0) )
   }
 
+}
+
+/// Copy `src` (clamped to `cap` bytes) into a running program's linear memory at `ptr`, returning
+/// the number of bytes written. Shared by the `host::hostname` / `host::peer_report` imports. Traps
+/// if the module has no `memory` export or the destination range is out of bounds.
+fn write_guest_bytes(caller: &mut wasmtime::Caller<'_, RPStoreData>, ptr: i32, cap: i32, src: &[u8]) -> wasmtime::Result<i32> {
+  let memory = match caller.get_export("memory") {
+    Some(wasmtime::Extern::Memory(mem)) => mem,
+    _ => return Err(wasmtime::Trap::MemoryOutOfBounds.into()),
+  };
+  let cap = cap.max(0) as usize;
+  let n = src.len().min(cap);
+  let start = ptr.max(0) as usize;
+  let dst = memory
+    .data_mut(&mut *caller)
+    .get_mut(start..start + n)
+    .ok_or(wasmtime::Trap::MemoryOutOfBounds)?;
+  dst.copy_from_slice(&src[..n]);
+  Ok(n as i32)
+}
+
+/// Lowercase hex encoding, used to key peers by their public key and to render keys for programs.
+fn to_hex(bytes: &[u8]) -> String {
+  let mut s = String::with_capacity(bytes.len() * 2);
+  for b in bytes {
+    s.push_str(&format!("{:02x}", b));
+  }
+  s
+}
+
+/// Best-effort OS hostname, resolved by shelling out to the `hostname` command (present on Linux,
+/// macOS, and Windows). Falls back to "unknown-host" so a missing tool never breaks the executor.
+async fn get_hostname() -> String {
+  match tokio::process::Command::new("hostname").output().await {
+    Ok(out) if out.status.success() => {
+      let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+      if name.is_empty() { "unknown-host".to_string() } else { name }
+    }
+    _ => "unknown-host".to_string(),
+  }
 }
 
 

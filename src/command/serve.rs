@@ -89,7 +89,10 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
       }
     }
 
-    let mut buf = [0; 16*1024];
+    // A whole program arrives in one datagram, so this must be large enough to hold the biggest
+    // ExecuteRequest we expect. UDP tops out near 64KiB; size to that so we don't silently truncate
+    // (a too-small buffer clips the request and serde_bare fails with UnexpectedEof).
+    let mut buf = [0; 64*1024];
     loop {
         let (len, addr) = sock.recv_from(&mut buf).await.map_err(map_loc_err!())?;
         //tracing::warn!("{:?} bytes received from {:?} => {:?}", len, addr, &buf[..len]);
@@ -108,6 +111,9 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
                 if crate::v_is_info() {
                   tracing::warn!("Recieved ExecuteRequest: {:?}", &program_data.human_name );
                 }
+                // Passively remember whoever just contacted us as a fabric neighbour. This is not a
+                // discovery protocol: it just lets later discovery *programs* enumerate our peers.
+                executor.note_peer(addr, &program_data.source);
                 let stdio_fwd = executor::wasi_adapters::WasiStdioSimpleForwarder::new_udp(addr, UdpSocketSender::new(&sock) );
                 match executor.begin_exec(&program_data, stdio_fwd).await { // TODO async off to a thread pool
                   Ok(running_pid) => {

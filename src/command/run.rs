@@ -98,7 +98,8 @@ pub async fn run_one_iface(ex_req_bytes: &[u8], pd: &executor::ProgramData, ifac
   }
 
   // sock.connect( (*multicast_group, port) ).await.map_err(map_loc_err!())?;
-  let mut buf = [0; 1024];
+  // Sized to a full UDP datagram so large forwarded stdout payloads aren't truncated.
+  let mut buf = [0; 64*1024];
 
   let len = sock.send_to(&ex_req_bytes, (*multicast_group, port)).await.map_err(map_loc_err!())?;
   tracing::warn!("{:?} bytes sent", len);
