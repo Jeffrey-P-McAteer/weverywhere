@@ -236,6 +236,10 @@ pub struct RPStoreData {
   pub caller_pubkey: Vec<u8>,
   /// Hop distance from the origin (== inbound visited length; origin's direct responders are 1).
   pub depth: u32,
+  /// This node's OWN socket address (`ip:port`) as it believes it is reachable by the caller, or
+  /// None if it couldn't be determined. Surfaced via `host::node_addr` so a discovery program reports
+  /// the real node address rather than the relay it was reached through. See [`Executor::begin_exec`].
+  pub node_addr: Option<String>,
   /// Where discovery host functions deposit the node's CBOR record + onward-forwarding UUID for the
   /// serve loop to pick up after the program exits.
   pub return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>,
@@ -415,7 +419,7 @@ impl Executor {
     });
   }
 
-  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
+  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, node_addr: Option<String>, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -434,7 +438,7 @@ impl Executor {
       }
     }
 
-    self.create_pid(program, is_trusted, stdio_forwarder, return_slot).await
+    self.create_pid(program, is_trusted, stdio_forwarder, node_addr, return_slot).await
   }
 
   fn create_next_pid(&self) -> u64 {
@@ -448,7 +452,7 @@ impl Executor {
     Ok(())
   }
 
-  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
+  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, node_addr: Option<String>, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
     let this_program_pid = self.create_next_pid();
 
@@ -506,6 +510,7 @@ impl Executor {
       our_pubkey: self.identity_pubkey.clone(),
       caller_pubkey: program.source.encoded_public_key.clone(),
       depth: program.visited.len() as u32,
+      node_addr: node_addr,
       return_slot: return_slot,
     };
 
@@ -681,6 +686,23 @@ impl Executor {
           "depth",
           move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
             Box::new(async move { Ok(caller.data().depth as i32) })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::node_addr(ptr, cap) -> bytes_written (or -1 if this node couldn't determine its own
+      // address). Writes this node's OWN socket address (`ip:port`) - the address it believes the
+      // caller reached it on - into guest memory. Discovery programs put this in their record so the
+      // client shows the real node address instead of the relay it was reached through.
+      linker.func_wrap_async(
+          "host",
+          "node_addr",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, cap): (i32, i32)| {
+            Box::new(async move {
+              match caller.data().node_addr.clone() {
+                Some(s) => write_guest_bytes(&mut caller, ptr, cap, s.as_bytes()),
+                None => Ok(-1i32),
+              }
+            })
           },
       ).map_err(map_loc_err!())?;
 

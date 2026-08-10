@@ -20,6 +20,7 @@
 // Output is a CBOR map with small integer keys (kept in sync with crate::discovery::record_keys):
 //   1 => attestation (CBOR byte string)   2 => trusts_caller (uint 0/1)
 //   3 => depth (uint)                      4 => parent pubkey (byte string)
+//   5 => node addr (text "ip:port")
 //
 // Freestanding (no libc/stdio) so the module stays tiny; the record must fit one UDP datagram.
 
@@ -45,6 +46,12 @@ int host_caller_pubkey(char* ptr, int cap);
 // this node has no identity key.
 __attribute__((import_module("host"), import_name("signed_attestation")))
 int host_signed_attestation(char* ptr, int cap);
+
+// Write this node's OWN socket address ("ip:port", as the caller reached it) into [ptr, ptr+cap);
+// returns bytes written, or -1 if the node could not determine its address. Reporting this lets the
+// origin show each node's real address instead of the relay it was reached through.
+__attribute__((import_module("host"), import_name("node_addr")))
+int host_node_addr(char* ptr, int cap);
 
 // Hand our finished CBOR node record to the daemon (sent to the caller as a BasicReturnMap).
 __attribute__((import_module("host"), import_name("return_map")))
@@ -88,11 +95,13 @@ static void cbor_head(int major, unsigned long long val) {
 
 static void cbor_uint(unsigned long long v) { cbor_head(0, v); }
 static void cbor_bytes(const unsigned char* b, int n) { cbor_head(2, (unsigned long long)n); put_bytes(b, n); }
+static void cbor_text(const unsigned char* b, int n) { cbor_head(3, (unsigned long long)n); put_bytes(b, n); }
 
 // Scratch buffers for host-provided byte strings.
 static unsigned char attest[1024];
 static unsigned char parent[64];
 static unsigned char uuid[16];
+static unsigned char node_addr[64];
 
 __attribute__((export_name("_start")))
 void _start(void) {
@@ -107,13 +116,16 @@ void _start(void) {
   int depth = host_depth(); if (depth < 0) depth = 0;
   int plen = host_caller_pubkey((char*)parent, (int)sizeof(parent));
   if (plen < 0) plen = 0;
+  int nlen = host_node_addr((char*)node_addr, (int)sizeof(node_addr));
+  if (nlen < 0) nlen = 0;                        // address unknown: empty text string
 
-  // 3. Encode the CBOR node record: a 4-entry map with integer keys.
-  cbor_head(5, 4);                              // map(4)
+  // 3. Encode the CBOR node record: a 5-entry map with integer keys.
+  cbor_head(5, 5);                              // map(5)
   cbor_uint(1); cbor_bytes(attest, alen);       // 1 => attestation
   cbor_uint(2); cbor_uint((unsigned)trusts);    // 2 => trusts_caller
   cbor_uint(3); cbor_uint((unsigned)depth);     // 3 => depth
   cbor_uint(4); cbor_bytes(parent, plen);       // 4 => parent pubkey
+  cbor_uint(5); cbor_text(node_addr, nlen);     // 5 => node addr ("ip:port")
 
   host_return_map((const char*)out, out_len);
 }

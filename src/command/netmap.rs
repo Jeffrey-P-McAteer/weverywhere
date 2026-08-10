@@ -191,13 +191,17 @@ struct Node {
   hostname: String,
   parent: Vec<u8>,
   trusts_caller: bool,
+  /// The node's OWN address as it reported it (record key 5). Preferred for display over `responder`,
+  /// which for a relayed record is the intermediate daemon that forwarded it up, not the node itself.
+  node_addr: Option<String>,
   responder: SocketAddr,
   sig_valid: bool,
   time_ok: bool,
 }
 
-/// Decode a per-node record CBOR map into its fields (attestation bytes + parent + trusts_caller).
-fn parse_record(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>, bool)> {
+/// Decode a per-node record CBOR map into its fields (attestation bytes + parent + trusts_caller +
+/// the node's self-reported address).
+fn parse_record(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>, bool, Option<String>)> {
   use serde_cbor::Value;
   let map = match serde_cbor::from_slice::<Value>(bytes).ok()? {
     Value::Map(m) => m,
@@ -215,7 +219,13 @@ fn parse_record(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>, bool)> {
     map.get(&Value::Integer(discovery::record_keys::TRUSTS_CALLER)),
     Some(Value::Integer(1))
   );
-  Some((attestation, parent, trusts_caller))
+  // Accept the address as either a text or byte string; an empty value means "unknown".
+  let node_addr = match map.get(&Value::Integer(discovery::record_keys::NODE_ADDR)) {
+    Some(Value::Text(s)) if !s.is_empty() => Some(s.clone()),
+    Some(Value::Bytes(b)) if !b.is_empty() => Some(String::from_utf8_lossy(b).into_owned()),
+    _ => None,
+  };
+  Some((attestation, parent, trusts_caller, node_addr))
 }
 
 /// Verify + assemble the collected records into a tree and print it. Verifies each node's signature
@@ -226,7 +236,7 @@ fn print_network_map(you: &str, our_pubkey: &[u8], replies: &[(SocketAddr, Vec<u
   let mut nodes: HashMap<Vec<u8>, Node> = HashMap::new();
 
   for (responder, cbor) in replies {
-    let (attestation, parent, trusts_caller) = match parse_record(cbor) {
+    let (attestation, parent, trusts_caller, node_addr) = match parse_record(cbor) {
       Some(v) => v,
       None => continue,
     };
@@ -243,6 +253,7 @@ fn print_network_map(you: &str, our_pubkey: &[u8], replies: &[(SocketAddr, Vec<u
           hostname: vn.hostname,
           parent,
           trusts_caller,
+          node_addr,
           responder: *responder,
           sig_valid: true,
           time_ok,
@@ -318,7 +329,10 @@ fn print_subtree(
   let branch = if is_last { "`--" } else { "|--" };
   let trust_mark = if node.trusts_caller { "<3" } else { "x" };
   let warn = if node.sig_valid && node.time_ok { "" } else { " (!)" };
-  println!("{}{} {} @ {}   [{}]{}", prefix, branch, node.hostname, node.responder, trust_mark, warn);
+  // Prefer the node's self-reported address; fall back to the datagram source (which for a relayed
+  // record is the intermediate daemon, not this node).
+  let addr = node.node_addr.clone().unwrap_or_else(|| node.responder.to_string());
+  println!("{}{} {} @ {}   [{}]{}", prefix, branch, node.hostname, addr, trust_mark, warn);
 
   let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "|   " });
   if let Some(kids) = children.get(pk) {

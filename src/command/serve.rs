@@ -124,7 +124,12 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
                 executor.note_peer(addr, &program_data.source);
                 let return_slot = std::sync::Arc::new(std::sync::Mutex::new(executor::ExecReturn::default()));
                 let stdio_fwd = executor::wasi_adapters::WasiStdioSimpleForwarder::new_udp(addr, UdpSocketSender::new(&sock) );
-                match executor.begin_exec(&program_data, stdio_fwd, return_slot.clone()).await { // TODO async off to a thread pool
+                // Our OWN address as this caller reaches us: the local interface address on the same
+                // network as `addr`, paired with our serve port. Discovery reports this so the origin
+                // sees each node's real address instead of the relay it was reached through.
+                let node_addr = net_utils::local_addr_facing(addr.ip())
+                  .map(|ip| std::net::SocketAddr::new(ip, port).to_string());
+                match executor.begin_exec(&program_data, stdio_fwd, node_addr, return_slot.clone()).await { // TODO async off to a thread pool
                   Ok(running_pid) => {
                     if crate::v_is_info() {
                       tracing::info!("Spawned PID {}", running_pid);

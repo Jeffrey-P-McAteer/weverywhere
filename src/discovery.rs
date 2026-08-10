@@ -83,6 +83,11 @@ pub mod record_keys {
   pub const DEPTH: i128 = 3;
   /// byte string: the identity pubkey of this node's caller (its parent in the tree).
   pub const PARENT_PUBKEY: i128 = 4;
+  /// text string: this node's OWN socket address (`ip:port`), as it believes it is reachable on the
+  /// fabric. Reported by the node itself so the client shows the real node address rather than the
+  /// relay it was reached through (records relay back up through intermediate daemons). Empty/absent
+  /// when the node could not determine an address (e.g. a purely local run).
+  pub const NODE_ADDR: i128 = 5;
 }
 
 /// Half-window (seconds) a node's attestation timestamp may deviate from the verifier's clock: the
