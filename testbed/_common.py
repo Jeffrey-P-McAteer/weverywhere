@@ -752,6 +752,16 @@ netsh interface ip set address name="%NIC%" static {ip} {mask} {gw}>>"%LOG%" 2>&
 netsh interface ip set dns name="%NIC%" static 1.1.1.1>>"%LOG%" 2>&1
 netsh interface ip add dns name="%NIC%" 9.9.9.9 index=2>>"%LOG%" 2>&1
 
+rem --- clock: qemu presents the RTC in UTC (-rtc base=utc), but Windows treats the
+rem     RTC as local time by default, which skews the clock and makes signed node
+rem     attestations fall outside the netmap +/-30s window. Tell Windows the RTC is
+rem     UTC, then enable + force-sync the Windows Time service so the clock stays
+rem     disciplined. ---
+reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\TimeZoneInformation" /v RealTimeIsUniversal /t REG_DWORD /d 1 /f>>"%LOG%" 2>&1
+sc config w32time start= auto>>"%LOG%" 2>&1
+net start w32time>>"%LOG%" 2>&1
+w32tm /resync /force>>"%LOG%" 2>&1
+
 rem --- generate this node's identity key (so it trusts itself), then register +
 rem     start weverywhere's own daemon: a Task Scheduler onstart task that runs
 rem     `serve` (joins the multicast fabric and listens for direct traffic).
