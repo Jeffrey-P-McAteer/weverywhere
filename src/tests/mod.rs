@@ -5,4 +5,6 @@
 mod config;
 mod crypto_utils;
 mod discovery;
+mod executor;
 mod messages;
+mod tty;

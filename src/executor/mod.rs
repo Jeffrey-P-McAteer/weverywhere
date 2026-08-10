@@ -40,6 +40,11 @@ pub struct Executor {
   /// a discovery program can report this node's neighbours. See readme "Network discovery".
   peers: dashmap::DashMap<String, PeerInfo>,
 
+  /// This node's bounded log of messages received on the fabric (see [`MessageStore`]). Shared into
+  /// every program execution so a "deliver" program can push what a "ui" program later reads. Wrapped
+  /// in a std Mutex because the wasmtime host callbacks lock it only briefly.
+  messages: std::sync::Arc<std::sync::Mutex<MessageStore>>,
+
   /// Efficient OS primitive to wake up a ton of .await-ers.
   /// This one is fired every time a PID exits. The exit code may be found in pid_last_exit_code until a new process
   /// with the same PID is launched, at which point the code will be 0 until the process exits.
@@ -73,6 +78,97 @@ pub struct ExecReturn {
   pub forward_uuid: Option<[u8; 16]>,
 }
 
+/// CBOR integer keys inside a single message record returned by `host::messages_read`. Kept small so
+/// the C chat program can hand-decode them; mirror any change in example-programs/chat.c.
+pub mod message_keys {
+  /// uint: monotonic sequence number assigned by the receiving host (readers track the max they've seen).
+  pub const SEQ: i128 = 1;
+  /// text: the sender's VERIFIED human name (from the signature-checked request source).
+  pub const NAME: i128 = 2;
+  /// byte string: the sender's VERIFIED identity pubkey.
+  pub const PUBKEY: i128 = 3;
+  /// uint: seconds since the UTC epoch when the receiving host recorded the message.
+  pub const EPOCH_S: i128 = 4;
+  /// byte string: the message body exactly as the sending program supplied it.
+  pub const TEXT: i128 = 5;
+}
+
+/// One message recorded in a node's [`MessageStore`]. The identity fields are stamped by the host
+/// from the request's already-verified `source`, so a program can never forge a sender's name/pubkey.
+#[derive(Debug, Clone)]
+pub struct StoredMessage {
+  pub seq: u64,
+  pub from_name: String,
+  pub from_pubkey: Vec<u8>,
+  pub text: Vec<u8>,
+  pub epoch_s: u64,
+}
+
+/// A node's bounded, in-memory log of chat/messages received on the fabric. Lives on the [`Executor`]
+/// and is shared (via Arc) into every program execution, so a short-lived "deliver" program can push
+/// a message that a long-lived "ui" program on the same host later reads. Passive local state, like
+/// the peers registry - NOT a wire protocol.
+#[derive(Debug)]
+pub struct MessageStore {
+  next_seq: u64,
+  msgs: std::collections::VecDeque<StoredMessage>,
+  cap: usize,
+}
+
+impl MessageStore {
+  pub fn new(cap: usize) -> MessageStore {
+    MessageStore { next_seq: 1, msgs: std::collections::VecDeque::with_capacity(cap.min(1024)), cap }
+  }
+  /// Append a message with the host-stamped verified identity; returns its assigned sequence number.
+  pub fn push(&mut self, from_name: String, from_pubkey: Vec<u8>, text: Vec<u8>, epoch_s: u64) -> u64 {
+    let seq = self.next_seq;
+    self.next_seq += 1;
+    self.msgs.push_back(StoredMessage { seq, from_name, from_pubkey, text, epoch_s });
+    while self.msgs.len() > self.cap { self.msgs.pop_front(); }
+    seq
+  }
+  /// Messages with `seq > after_seq`, oldest first (clones, so the lock is released quickly).
+  pub fn read_after(&self, after_seq: u64) -> Vec<StoredMessage> {
+    self.msgs.iter().filter(|m| m.seq > after_seq).cloned().collect()
+  }
+}
+
+/// Per-execution wiring the launching context supplies to [`Executor::begin_exec`]. Bundled into one
+/// struct (rather than a growing parameter list) as the host surface expands. All fields are optional
+/// so a plain batch run can pass `ExecOptions::default()`.
+#[derive(Default)]
+pub struct ExecOptions {
+  /// This node's own address as the caller reached it, surfaced via `host::node_addr` (discovery).
+  pub node_addr: Option<String>,
+  /// Sink for `host::replicate` requests; `None` disables replication on this host.
+  pub replicate_tx: Option<tokio::sync::mpsc::UnboundedSender<ReplicateRequest>>,
+  /// An attached interactive terminal, exposed via the `host::tty_*` imports; `None` = no terminal.
+  pub tty: Option<std::sync::Arc<crate::tty::TtyHandle>>,
+  /// Run without the instruction (fuel) cap. Required for long-lived interactive programs, which
+  /// would otherwise trap once the fuel budget is exhausted. Only set this for trusted local launches.
+  pub uncapped_fuel: bool,
+}
+
+/// Where a `host::replicate` copy should be sent. Kept as an enum so we can grow targets (a specific
+/// peer, the local daemon, ...) without changing the host ABI (the guest passes a small integer).
+#[derive(Debug, Clone)]
+pub enum ReplicateScope {
+  /// The whole multicast fabric (every group on every interface) plus every configured `[[peer]]`.
+  Fabric,
+}
+
+/// A request, raised by a running program via `host::replicate`, to send a copy of ITSELF onto the
+/// network with the given arguments. The program only declares intent + args; the host that launched
+/// it (which holds the wasm bytes, our identity, and the network config) performs the actual send by
+/// draining these off the channel. This keeps I/O out of the sandbox and is the general mechanism for
+/// self-propagating / role-shifting programs (chat uses it to fan a "deliver" copy out to peers).
+#[derive(Debug, Clone)]
+pub struct ReplicateRequest {
+  pub scope: ReplicateScope,
+  pub arg_list: Vec<String>,
+  pub arg_map: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProgramData {
   /// Used to determine the Controller / Client of this program, and the trust given to it by Executors / Servers.
@@ -104,6 +200,19 @@ pub struct ProgramData {
   /// key is in this set (loop prevention) and appends its own key before forwarding.
   #[serde(default)]
   pub visited: Vec<Vec<u8>>,
+
+  // ---- Program arguments (general-purpose; how a program's behaviour is parameterised) ----
+  /// Positional string arguments, read by the guest via `host::arg_get`. When a program replicates
+  /// copies of itself onto the fabric it chooses these for each copy, so one program body can take on
+  /// different roles as it spreads. Defaults to empty for a plain `run`.
+  #[serde(default)]
+  pub arg_list: Vec<String>,
+
+  /// Named string arguments (key -> value), read by the guest via `host::arg_map_get`. Kept as an
+  /// ordered Vec of pairs so the serde_bare encoding is deterministic. The chat program selects its
+  /// role from `arg_map["mode"]`, for example. Defaults to empty for a plain `run`.
+  #[serde(default)]
+  pub arg_map: Vec<(String, String)>,
 }
 
 impl ProgramData {
@@ -135,6 +244,8 @@ pub struct ProgramDataBuilder {
   request_uuid: [u8; 16],
   depth_budget: u8,
   visited: Vec<Vec<u8>>,
+  arg_list: Vec<String>,
+  arg_map: Vec<(String, String)>,
 }
 
 impl ProgramDataBuilder {
@@ -147,7 +258,15 @@ impl ProgramDataBuilder {
       request_uuid: [0u8; 16],
       depth_budget: 0,
       visited: Vec::new(),
+      arg_list: Vec::new(),
+      arg_map: Vec::new(),
     }
+  }
+  /// Set the program's positional (`arg_list`) and named (`arg_map`) arguments in one call.
+  pub fn set_args(mut self, arg_list: Vec<String>, arg_map: Vec<(String, String)>) -> Self {
+    self.arg_list = arg_list;
+    self.arg_map = arg_map;
+    self
   }
   /// Set the discovery request context (UUID + how many hops it may still be forwarded + the set of
   /// identity keys already visited). Inert for a normal `run` (defaults: zero UUID, depth 0, empty).
@@ -185,6 +304,8 @@ impl ProgramDataBuilder {
         request_uuid: self.request_uuid,
         depth_budget: self.depth_budget,
         visited: self.visited,
+        arg_list: self.arg_list,
+        arg_map: self.arg_map,
       })
     }
     else {
@@ -234,12 +355,30 @@ pub struct RPStoreData {
   pub our_pubkey: Vec<u8>,
   /// The caller's identity pubkey (this node's parent in the discovery tree).
   pub caller_pubkey: Vec<u8>,
+  /// The caller's VERIFIED human name (from the signature-checked source). Stamped onto messages the
+  /// program pushes so a chat handle can't be forged. See `host::messages_push`.
+  pub caller_name: String,
+  /// This node's message store, shared from the [`Executor`] for `host::messages_push`/`messages_read`.
+  pub messages: std::sync::Arc<std::sync::Mutex<MessageStore>>,
+  /// Snapshot of this node's trusted identity pubkeys, for the general `host::trusts_key` query.
+  pub trusted_pubkeys: Vec<Vec<u8>>,
+  /// Where `host::replicate` deposits requests to send a copy of this program onward. The launcher
+  /// that owns this program drains the channel and performs the send. `None` when the current host
+  /// doesn't support replication (the call then no-ops with -1).
+  pub replicate_tx: Option<tokio::sync::mpsc::UnboundedSender<ReplicateRequest>>,
+  /// An attached interactive terminal for the `host::tty_*` imports; `None` when not running in a UI
+  /// context (the tty imports then report "no terminal").
+  pub tty: Option<std::sync::Arc<crate::tty::TtyHandle>>,
   /// Hop distance from the origin (== inbound visited length; origin's direct responders are 1).
   pub depth: u32,
   /// This node's OWN socket address (`ip:port`) as it believes it is reachable by the caller, or
   /// None if it couldn't be determined. Surfaced via `host::node_addr` so a discovery program reports
   /// the real node address rather than the relay it was reached through. See [`Executor::begin_exec`].
   pub node_addr: Option<String>,
+  /// Positional program arguments, snapshotted for the `host::arg_*` imports.
+  pub arg_list: Vec<String>,
+  /// Named program arguments (key -> value), snapshotted for the `host::arg_map_*` imports.
+  pub arg_map: Vec<(String, String)>,
   /// Where discovery host functions deposit the node's CBOR record + onward-forwarding UUID for the
   /// serve loop to pick up after the program exits.
   pub return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>,
@@ -343,6 +482,9 @@ impl Executor {
             // shard count is plenty.
             peers: dashmap::DashMap::with_capacity_and_shard_amount(256, 8),
 
+            // A few thousand messages is plenty for an interactive session; oldest are dropped.
+            messages: std::sync::Arc::new(std::sync::Mutex::new(MessageStore::new(4096))),
+
             pid_exit_signal: tokio::sync::Notify::new(),
             running_programs_insert_signal: tokio::sync::Notify::new(),
 
@@ -419,7 +561,7 @@ impl Executor {
     });
   }
 
-  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, node_addr: Option<String>, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
+  pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, opts: ExecOptions, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
       Ok(_) => { }
@@ -438,7 +580,7 @@ impl Executor {
       }
     }
 
-    self.create_pid(program, is_trusted, stdio_forwarder, node_addr, return_slot).await
+    self.create_pid(program, is_trusted, stdio_forwarder, opts, return_slot).await
   }
 
   fn create_next_pid(&self) -> u64 {
@@ -452,7 +594,7 @@ impl Executor {
     Ok(())
   }
 
-  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, node_addr: Option<String>, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
+  async fn create_pid(&self, program: &ProgramData, program_is_trusted: bool, mut stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, opts: ExecOptions, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Allocate space in our PIDs; TODO check for wraparound and/or pre-existing stuff, terminate old when new PID is issued?
     let this_program_pid = self.create_next_pid();
 
@@ -468,7 +610,10 @@ impl Executor {
     }).collect();
 
     let mut config = wasmtime::Config::new();
-    config.consume_fuel(true); // Enable fuel tracking for instruction counting
+    // Long-lived interactive programs (e.g. the chat UI) must run without the instruction cap or they
+    // trap once fuel runs out; batch/fabric programs keep the cap. Fuel tracking is only enabled when
+    // we intend to cap, since store.set_fuel requires it.
+    config.consume_fuel(!opts.uncapped_fuel);
     config.async_support(true); // Affects APIs available
 
     let engine = wasmtime::Engine::new(&config).map_err(map_loc_err!())?;
@@ -509,8 +654,15 @@ impl Executor {
       signing_key: self.identity_signing_key.clone(),
       our_pubkey: self.identity_pubkey.clone(),
       caller_pubkey: program.source.encoded_public_key.clone(),
+      caller_name: program.source.human_name.clone(),
+      messages: self.messages.clone(),
+      trusted_pubkeys: self.trusted_keys.iter().map(|kv| kv.value().as_bytes().to_vec()).collect(),
+      replicate_tx: opts.replicate_tx,
+      tty: opts.tty,
       depth: program.visited.len() as u32,
-      node_addr: node_addr,
+      node_addr: opts.node_addr,
+      arg_list: program.arg_list.clone(),
+      arg_map: program.arg_map.clone(),
       return_slot: return_slot,
     };
 
@@ -518,8 +670,11 @@ impl Executor {
       let write_lock = arc_rp_data.read().await;
       let engine_read_lock = write_lock.engine.read().await;
       let mut store = wasmtime::Store::new(&engine_read_lock, rps_store_data);
-      // Set initial fuel (roughly corresponds to instruction count)
-      store.set_fuel(128_000).map_err(map_loc_err!())?;
+      // Set initial fuel (roughly corresponds to instruction count) only when the engine is tracking
+      // fuel; an uncapped interactive program has consume_fuel disabled and would reject set_fuel.
+      if !opts.uncapped_fuel {
+        store.set_fuel(128_000).map_err(map_loc_err!())?;
+      }
 
       *write_lock.store.write().await = Some(store);
     }
@@ -686,6 +841,267 @@ impl Executor {
           "depth",
           move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
             Box::new(async move { Ok(caller.data().depth as i32) })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::arg_len() -> n. Number of positional program arguments (arg_list) available.
+      linker.func_wrap_async(
+          "host",
+          "arg_len",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move { Ok(caller.data().arg_list.len() as i32) })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::arg_get(index, ptr, cap) -> bytes_written (or -1 if index is out of range). Writes the
+      // positional argument at `index` into guest memory.
+      linker.func_wrap_async(
+          "host",
+          "arg_get",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (index, ptr, cap): (i32, i32, i32)| {
+            Box::new(async move {
+              let val = caller.data().arg_list.get(index as usize).cloned();
+              match val {
+                Some(s) => write_guest_bytes(&mut caller, ptr, cap, s.as_bytes()),
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::arg_map_len() -> n. Number of named arguments (arg_map key/value pairs).
+      linker.func_wrap_async(
+          "host",
+          "arg_map_len",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move { Ok(caller.data().arg_map.len() as i32) })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::arg_map_key(index, ptr, cap) -> bytes_written (or -1 if out of range). Writes the KEY of
+      // the named argument at `index`, so a program can enumerate all keys it was given.
+      linker.func_wrap_async(
+          "host",
+          "arg_map_key",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (index, ptr, cap): (i32, i32, i32)| {
+            Box::new(async move {
+              let key = caller.data().arg_map.get(index as usize).map(|(k, _)| k.clone());
+              match key {
+                Some(s) => write_guest_bytes(&mut caller, ptr, cap, s.as_bytes()),
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::arg_map_get(key_ptr, key_len, ptr, cap) -> bytes_written (or -1 if the key is absent).
+      // Looks up a named argument by key and writes its value into guest memory.
+      linker.func_wrap_async(
+          "host",
+          "arg_map_get",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (key_ptr, key_len, ptr, cap): (i32, i32, i32, i32)| {
+            Box::new(async move {
+              let key = read_guest_bytes(&mut caller, key_ptr, key_len)?;
+              let key = String::from_utf8_lossy(&key).into_owned();
+              let val = caller.data().arg_map.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone());
+              match val {
+                Some(s) => write_guest_bytes(&mut caller, ptr, cap, s.as_bytes()),
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::messages_push(text_ptr, text_len) -> seq. Append a message to this node's message store.
+      // The host stamps the VERIFIED caller identity (name + pubkey, from the signature-checked source)
+      // and the current time; the guest supplies only the body. Returns the assigned sequence number.
+      // Open to all senders (chat is public) - trust is queried separately via host::trusts_key.
+      linker.func_wrap_async(
+          "host",
+          "messages_push",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (text_ptr, text_len): (i32, i32)| {
+            Box::new(async move {
+              let text = read_guest_bytes(&mut caller, text_ptr, text_len)?;
+              let (name, pubkey, store) = {
+                let d = caller.data();
+                (d.caller_name.clone(), d.caller_pubkey.clone(), d.messages.clone())
+              };
+              let epoch = sys_utils::epoch_seconds_now_utc0();
+              let seq = match store.lock() {
+                Ok(mut s) => s.push(name, pubkey, text, epoch),
+                Err(_) => 0,
+              };
+              Ok(seq as i64)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::messages_read(after_seq, ptr, cap) -> bytes_written. Writes a CBOR array of message
+      // records (keys per crate::executor::message_keys) with seq > after_seq into guest memory, newest
+      // last. Not trust-gated: chat is public. If the full set won't fit in `cap`, the oldest matching
+      // messages that fit are returned; the reader advances its high-water seq and gets the rest next
+      // poll. Returns bytes written (0 when nothing new).
+      linker.func_wrap_async(
+          "host",
+          "messages_read",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (after_seq, ptr, cap): (i64, i32, i32)| {
+            Box::new(async move {
+              let after = if after_seq < 0 { 0u64 } else { after_seq as u64 };
+              let msgs = match caller.data().messages.lock() {
+                Ok(s) => s.read_after(after),
+                Err(_) => Vec::new(),
+              };
+              let cap = cap.max(0) as usize;
+              let bytes = encode_messages_cbor(&msgs, cap);
+              write_guest_bytes(&mut caller, ptr, cap as i32, &bytes)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::trusts_key(pubkey_ptr, pubkey_len) -> 1 if this node trusts the given identity pubkey,
+      // else 0. The general form of host::trusts_me: lets a program that cares about trust evaluate any
+      // sender's key (e.g. the pubkey on a message record) while trust-agnostic programs ignore it.
+      linker.func_wrap_async(
+          "host",
+          "trusts_key",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (pubkey_ptr, pubkey_len): (i32, i32)| {
+            Box::new(async move {
+              let key = read_guest_bytes(&mut caller, pubkey_ptr, pubkey_len)?;
+              let trusted = caller.data().trusted_pubkeys.iter().any(|k| k.as_slice() == key.as_slice());
+              Ok(if trusted { 1i32 } else { 0i32 })
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::replicate(scope, args_ptr, args_len) -> 0 (queued) | -1 (no replication sink here).
+      // Sends a copy of THIS program onto the network with the given arguments. `scope` selects the
+      // target (0 = the whole fabric). `args` is a small CBOR map { 1: [list strings], 2: [flattened
+      // k,v strings] } the guest builds; the launcher fills in the wasm bytes + our signed identity
+      // and does the actual send. This is the general self-propagation / role-shift primitive.
+      linker.func_wrap_async(
+          "host",
+          "replicate",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (scope, args_ptr, args_len): (i32, i32, i32)| {
+            Box::new(async move {
+              let args = read_guest_bytes(&mut caller, args_ptr, args_len)?;
+              let (arg_list, arg_map) = decode_replicate_args(&args);
+              let scope = match scope { _ => ReplicateScope::Fabric }; // only Fabric today; reserve others
+              let req = ReplicateRequest { scope, arg_list, arg_map };
+              match &caller.data().replicate_tx {
+                Some(tx) => Ok(if tx.send(req).is_ok() { 0i32 } else { -1i32 }),
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_available() -> 1 if an interactive terminal is attached to this execution, else 0.
+      linker.func_wrap_async(
+          "host",
+          "tty_available",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move { Ok(if caller.data().tty.is_some() { 1i32 } else { 0i32 }) })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_size(ptr) -> bytes_written (4: cols u16 LE, rows u16 LE), or -1 if no terminal.
+      linker.func_wrap_async(
+          "host",
+          "tty_size",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr,): (i32,)| {
+            Box::new(async move {
+              let tty = match caller.data().tty.clone() { Some(t) => t, None => return Ok(-1i32) };
+              let (cols, rows) = tty.size();
+              let mut b = [0u8; 4];
+              b[0..2].copy_from_slice(&cols.to_le_bytes());
+              b[2..4].copy_from_slice(&rows.to_le_bytes());
+              write_guest_bytes(&mut caller, ptr, 4, &b)
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_next_event(ptr, cap, timeout_ms) -> bytes_written (encoded event, see crate::tty),
+      // 0 if the timeout elapsed with no input, or -1 if there is no terminal. Blocking a whole thread
+      // is avoided: this awaits, so other tasks (inbound messages, replication) keep running.
+      linker.func_wrap_async(
+          "host",
+          "tty_next_event",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, cap, timeout_ms): (i32, i32, i32)| {
+            Box::new(async move {
+              let tty = match caller.data().tty.clone() { Some(t) => t, None => return Ok(-1i32) };
+              let dur = std::time::Duration::from_millis(timeout_ms.max(0) as u64);
+              match tty.next_event(dur).await {
+                Some(ev) => {
+                  let bytes = crate::tty::encode_event(&ev);
+                  write_guest_bytes(&mut caller, ptr, cap, &bytes)
+                }
+                None => Ok(0i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_print(ptr, len) -> 0, or -1 if no terminal. Queues text at the cursor (present it
+      // with host::tty_flush).
+      linker.func_wrap_async(
+          "host",
+          "tty_print",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (ptr, len): (i32, i32)| {
+            Box::new(async move {
+              let bytes = read_guest_bytes(&mut caller, ptr, len)?;
+              match caller.data().tty.clone() {
+                Some(tty) => { tty.print(&String::from_utf8_lossy(&bytes)); Ok(0i32) }
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_move(col, row) -> 0/-1. Move the cursor to a 0-based (col, row).
+      linker.func_wrap_async(
+          "host",
+          "tty_move",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, (col, row): (i32, i32)| {
+            Box::new(async move {
+              match &caller.data().tty {
+                Some(tty) => { tty.move_to(col.max(0) as u16, row.max(0) as u16); Ok(0i32) }
+                None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_clear() -> 0/-1. Clear the whole screen.
+      linker.func_wrap_async(
+          "host",
+          "tty_clear",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move {
+              match &caller.data().tty { Some(tty) => { tty.clear(); Ok(0i32) } None => Ok(-1i32) }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_style(fg, bg, attrs) -> 0/-1. Set colour (ANSI 0-15, -1 = default) and attributes
+      // (bit0 bold, bit1 underline, bit2 reverse; 0 resets).
+      linker.func_wrap_async(
+          "host",
+          "tty_style",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, (fg, bg, attrs): (i32, i32, i32)| {
+            Box::new(async move {
+              match &caller.data().tty { Some(tty) => { tty.style(fg, bg, attrs); Ok(0i32) } None => Ok(-1i32) }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::tty_flush() -> 0/-1. Present everything queued since the last flush.
+      linker.func_wrap_async(
+          "host",
+          "tty_flush",
+          move |caller: wasmtime::Caller<'_, RPStoreData>, _unused: ()| {
+            Box::new(async move {
+              match &caller.data().tty { Some(tty) => { tty.flush(); Ok(0i32) } None => Ok(-1i32) }
+            })
           },
       ).map_err(map_loc_err!())?;
 
@@ -934,6 +1350,66 @@ fn read_guest_bytes(caller: &mut wasmtime::Caller<'_, RPStoreData>, ptr: i32, le
     .get(start..start + n)
     .ok_or(wasmtime::Trap::MemoryOutOfBounds)?;
   Ok(data.to_vec())
+}
+
+/// Encode `msgs` as a CBOR array of message-record maps (keys per [`message_keys`]), fitting within
+/// `cap` bytes. If the whole set doesn't fit, the oldest messages that DO fit are returned (readers
+/// advance their high-water seq and pick up the rest on the next poll). Returns `[]`-encoding bytes
+/// when nothing fits or the list is empty.
+fn encode_messages_cbor(msgs: &[StoredMessage], cap: usize) -> Vec<u8> {
+  use serde_cbor::Value;
+  let to_value = |m: &StoredMessage| {
+    Value::Map(
+      [
+        (Value::Integer(message_keys::SEQ), Value::Integer(m.seq as i128)),
+        (Value::Integer(message_keys::NAME), Value::Text(m.from_name.clone())),
+        (Value::Integer(message_keys::PUBKEY), Value::Bytes(m.from_pubkey.clone())),
+        (Value::Integer(message_keys::EPOCH_S), Value::Integer(m.epoch_s as i128)),
+        (Value::Integer(message_keys::TEXT), Value::Bytes(m.text.clone())),
+      ]
+      .into_iter()
+      .collect(),
+    )
+  };
+  // Grow the returned prefix until adding one more record would overflow cap.
+  let mut n = msgs.len();
+  loop {
+    let list: Vec<Value> = msgs[..n].iter().map(&to_value).collect();
+    let encoded = serde_cbor::to_vec(&Value::Array(list)).unwrap_or_default();
+    if encoded.len() <= cap || n == 0 {
+      return encoded;
+    }
+    n -= 1;
+  }
+}
+
+/// Decode the CBOR a guest passes to `host::replicate` into (arg_list, arg_map). Shape:
+/// `{ 1: [text...], 2: [text...] }` where key 1 is the positional list and key 2 is the named map as
+/// a flattened `[k0, v0, k1, v1, ...]` array. Anything missing/malformed yields empty vectors, so a
+/// bad payload simply replicates with no args rather than trapping.
+fn decode_replicate_args(bytes: &[u8]) -> (Vec<String>, Vec<(String, String)>) {
+  use serde_cbor::Value;
+  let map = match serde_cbor::from_slice::<Value>(bytes) {
+    Ok(Value::Map(m)) => m,
+    _ => return (Vec::new(), Vec::new()),
+  };
+  let as_texts = |v: Option<&Value>| -> Vec<String> {
+    match v {
+      Some(Value::Array(items)) => items
+        .iter()
+        .map(|it| match it {
+          Value::Text(s) => s.clone(),
+          Value::Bytes(b) => String::from_utf8_lossy(b).into_owned(),
+          _ => String::new(),
+        })
+        .collect(),
+      _ => Vec::new(),
+    }
+  };
+  let arg_list = as_texts(map.get(&Value::Integer(1)));
+  let flat = as_texts(map.get(&Value::Integer(2)));
+  let arg_map = flat.chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].clone(), c[1].clone())).collect();
+  (arg_list, arg_map)
 }
 
 /// Lowercase hex encoding, used to key peers by their public key and to render keys for programs.

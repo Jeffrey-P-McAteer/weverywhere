@@ -109,6 +109,16 @@ pub enum Command {
         /// UDP port the daemon listens on
         #[arg(short, long, default_value_t = 2240)]
         port: u16,
+
+        /// Named program argument, repeatable: `--arg key=value`. Passed to the program as its
+        /// arg_map and readable via host::arg_map_get.
+        #[arg(long = "arg", value_name = "KEY=VALUE")]
+        arg: Vec<String>,
+
+        /// Positional program argument, repeatable: `--arg-list value`. Passed to the program as its
+        /// arg_list and readable via host::arg_get.
+        #[arg(long = "arg-list", value_name = "VALUE")]
+        arg_list: Vec<String>,
     },
 
     /// Run the given WASI file locally, spinning up an executor as-if we had just become a server and recieved the program.
@@ -116,6 +126,22 @@ pub enum Command {
     RunLocal {
         /// Path to the WASI file
         file_path: std::path::PathBuf,
+
+        /// Named program argument, repeatable: `--arg key=value` (see `run`).
+        #[arg(long = "arg", value_name = "KEY=VALUE")]
+        arg: Vec<String>,
+
+        /// Positional program argument, repeatable: `--arg-list value` (see `run`).
+        #[arg(long = "arg-list", value_name = "VALUE")]
+        arg_list: Vec<String>,
+
+        /// Fabric multicast groups that host::replicate copies are broadcast to.
+        #[arg(short, long, default_value_t = default_multicast_groups() )]
+        multicast_groups: MulticastAddressVec,
+
+        /// UDP port that host::replicate copies are sent to.
+        #[arg(short, long, default_value_t = 2240)]
+        port: u16,
     },
 
     /// Listen on the given socket for network messages and execute WASI programs sent to us
@@ -164,6 +190,25 @@ pub enum Command {
         port: u16,
     },
 
+    /// Join an interactive fabric chat. Runs a self-contained host that listens on the fabric (like
+    /// `serve`) AND attaches your terminal, then runs the bundled chat WASI program in `ui` mode: it
+    /// draws the transcript, reads your keyboard, and fans each line out to every node by sending a
+    /// copy of itself (in `deliver` mode) onto the fabric. Every node's chat shows the sender's signed
+    /// name + public key. Run this INSTEAD of `serve` on a machine (both bind the same port).
+    Chat {
+        /// Path to the chat WASI program. Defaults to the bundled/embedded chat program.
+        #[arg(long)]
+        program: Option<std::path::PathBuf>,
+
+        /// UDP Multicast addresses to chat over.
+        #[arg(short, long, default_value_t = default_multicast_groups() )]
+        multicast_groups: MulticastAddressVec,
+
+        /// UDP port to listen/chat on.
+        #[arg(short, long, default_value_t = 2240)]
+        port: u16,
+    },
+
     /// Manage weverywhere as a long-running background daemon (OS service) that runs `serve`.
     /// Uses the native service manager on each platform: systemd on Linux, launchd on macOS,
     /// and the Task Scheduler on Windows. Most actions must run as root / Administrator.
@@ -188,6 +233,18 @@ pub enum DaemonAction {
     Restart,
     /// Print whether the daemon is installed and running
     Status,
+}
+
+/// Turn repeated `--arg key=value` CLI strings into an ordered arg_map. Each entry is split on the
+/// FIRST `=`; an entry with no `=` becomes `key -> ""`. Order is preserved.
+pub fn parse_arg_map(entries: &[String]) -> Vec<(String, String)> {
+    entries
+        .iter()
+        .map(|e| match e.split_once('=') {
+            Some((k, v)) => (k.to_string(), v.to_string()),
+            None => (e.clone(), String::new()),
+        })
+        .collect()
 }
 
 fn default_multicast_groups() -> MulticastAddressVec {

@@ -4,7 +4,7 @@ use super::*;
 use wasmtime::*;
 
 
-pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> DynResult<()> {
+pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args, arg_list: Vec<String>, arg_map: Vec<(String, String)>, multicast_groups: args::MulticastAddressVec, port: u16) -> DynResult<()> {
 
   let local_config = config::Config::read_from_file(&args.config_path()).await.map_err(map_loc_err!())?;
 
@@ -22,13 +22,20 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
     )
     .set_wasm_program_bytes(&wasm_bytes)
     .set_source(&source)
+    .set_args(arg_list, arg_map)
     .build().map_err(map_loc_err!())?;
 
   let executor = executor::Executor::new(&local_config).await;
 
+  // host::replicate deposits requests here. run-local drains them AFTER the (short-lived) program
+  // exits: all replicate() calls in a batch program run during _start, so they're queued by exit
+  // time. (The interactive `chat` launcher drains concurrently instead - see that command.)
+  let (replicate_tx, mut replicate_rx) = tokio::sync::mpsc::unbounded_channel::<executor::ReplicateRequest>();
+
   let return_slot = std::sync::Arc::new(std::sync::Mutex::new(executor::ExecReturn::default()));
   // Purely local run: no fabric caller, so there's no meaningful "own address facing the caller".
-  match executor.begin_exec(&pd, executor::wasi_adapters::WasiStdioSimpleForwarder::new_nop(), None, return_slot ).await {
+  let exec_opts = executor::ExecOptions { replicate_tx: Some(replicate_tx), ..Default::default() };
+  match executor.begin_exec(&pd, executor::wasi_adapters::WasiStdioSimpleForwarder::new_nop(), exec_opts, return_slot ).await {
     Ok(running_pid) => {
       if crate::v_is_info() {
         tracing::info!("Spawned PID {}", running_pid);
@@ -41,6 +48,19 @@ pub async fn run_local(file_path: &std::path::PathBuf, args: &args::Args) -> Dyn
     }
     Err(e) => {
       tracing::info!("e = {:?}", e);
+    }
+  }
+
+  let groups: Vec<std::net::IpAddr> = multicast_groups.iter().copied().collect();
+  while let Ok(req) = replicate_rx.try_recv() {
+    match req.scope {
+      executor::ReplicateScope::Fabric => {
+        if let Err(e) = run::broadcast_program_to_fabric(
+          &wasm_bytes, &source, &pd.human_name, req.arg_list, req.arg_map, &groups, port, &local_config.peer,
+        ).await {
+          tracing::warn!("[ run-local ] replicate failed: {:?}", e);
+        }
+      }
     }
   }
 

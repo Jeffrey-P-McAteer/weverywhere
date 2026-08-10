@@ -23,6 +23,10 @@ getifs = "0.4"
 
 glob = "0.3"
 
+# Cross-platform terminal control (raw mode, key events, styling) backing the host::tty_* driver.
+# Works on Windows (incl. legacy consoles via Virtual Terminal), macOS, and Linux with no C deps.
+crossterm = "0.28"
+
 rand = { version = "0.8" }
 
 

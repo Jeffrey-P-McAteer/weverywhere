@@ -2,7 +2,7 @@
 use super::*;
 
 
-pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool, multicast_groups: args::MulticastAddressVec, port: u16) -> DynResult<()> {
+pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool, multicast_groups: args::MulticastAddressVec, port: u16, arg_list: Vec<String>, arg_map: Vec<(String, String)>) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
   // Step 1: Read the executable material & form an exeute request object, sign it, and transmit.
@@ -18,6 +18,7 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool
     )
     .set_wasm_program_bytes(&wasm_bytes)
     .set_source(&source)
+    .set_args(arg_list, arg_map)
     .build().map_err(map_loc_err!())?;
 
   let execute_req = messages::NetworkMessage::ExecuteRequest {
@@ -72,6 +73,65 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool
 
   tasks.join_all().await;
 
+  Ok(())
+}
+
+/// Fire-and-forget broadcast of a program onto the whole fabric (multicast on every interface +
+/// unicast to every configured `[[peer]]`), signed with `source`. Unlike [`run`] this does not wait
+/// for replies - it's the send side of `host::replicate`, used by self-propagating/role-shifting
+/// programs (e.g. the chat "ui" role fanning a "deliver" copy out to peers). The copy carries the
+/// given args and an empty discovery context (depth 0 / no visited), so recipients run it but don't
+/// themselves recurse unless their own logic calls replicate again.
+pub async fn broadcast_program_to_fabric(
+  wasm_bytes: &[u8],
+  source: &config::IdentityData,
+  human_name: &str,
+  arg_list: Vec<String>,
+  arg_map: Vec<(String, String)>,
+  multicast_groups: &[std::net::IpAddr],
+  port: u16,
+  peers: &[config::PeerMetadata],
+) -> DynResult<()> {
+  let pd = executor::ProgramDataBuilder::new()
+    .set_human_name(human_name)
+    .set_wasm_program_bytes(wasm_bytes)
+    .set_source(source)
+    .set_args(arg_list, arg_map)
+    .build()?;
+  let bytes = serde_bare::to_vec(&messages::NetworkMessage::ExecuteRequest { program_data: pd })?;
+
+  // Multicast to every group on every interface with at least one address.
+  for (_idx, _name, iface_addrs) in net_utils::get_interfaces().into_iter() {
+    if iface_addrs.is_empty() { continue; }
+    for group in multicast_groups.iter() {
+      match group {
+        std::net::IpAddr::V4(g) => {
+          if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await {
+            let _ = sock.set_multicast_ttl_v4(4);
+            let _ = sock.send_to(&bytes, (*g, port)).await;
+          }
+        }
+        std::net::IpAddr::V6(g) => {
+          if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).await {
+            let _ = sock.send_to(&bytes, (*g, port)).await;
+          }
+        }
+      }
+    }
+  }
+  // Unicast to every configured peer as well (covers hosts multicast can't reach).
+  for peer in peers.iter() {
+    if let Some(addr) = net_utils::resolve_peer_addr(peer, port).await {
+      let bind = if addr.is_ipv4() {
+        (std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0)
+      } else {
+        (std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
+      };
+      if let Ok(sock) = tokio::net::UdpSocket::bind(bind).await {
+        let _ = sock.send_to(&bytes, addr).await;
+      }
+    }
+  }
   Ok(())
 }
 

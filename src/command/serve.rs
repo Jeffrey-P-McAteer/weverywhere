@@ -14,6 +14,22 @@ pub async fn serve(args: &args::Args, multicast_group: args::MulticastAddressVec
   // Shared, read-only view of our config for the discovery relay (the [[peer]] forwarding targets).
   let local_config = std::sync::Arc::new(local_config);
 
+  let tasks = spawn_listeners(executor, local_config, multicast_group, port);
+  tasks.join_all().await;
+
+  Ok(())
+}
+
+/// Spawn one UDP listener task per (interface x multicast group) on the given executor, returning the
+/// JoinSet. Both `serve` and the self-contained `chat` host use this so a single executor (and its
+/// shared message store) backs all inbound fabric traffic. The caller decides whether to join the set
+/// (block, like `serve`) or let it run in the background (like `chat`, which also drives a UI).
+pub fn spawn_listeners(
+  executor: std::sync::Arc<executor::Executor>,
+  local_config: std::sync::Arc<config::Config>,
+  multicast_group: args::MulticastAddressVec,
+  port: u16,
+) -> tokio::task::JoinSet<()> {
   let mut tasks = tokio::task::JoinSet::new();
   for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
     for multicast_addr in multicast_group.iter() {
@@ -40,10 +56,7 @@ pub async fn serve(args: &args::Args, multicast_group: args::MulticastAddressVec
       });
     }
   }
-
-  tasks.join_all().await;
-
-  Ok(())
+  tasks
 }
 
 #[allow(unreachable_code)]
@@ -129,7 +142,8 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
                 // sees each node's real address instead of the relay it was reached through.
                 let node_addr = net_utils::local_addr_facing(addr.ip())
                   .map(|ip| std::net::SocketAddr::new(ip, port).to_string());
-                match executor.begin_exec(&program_data, stdio_fwd, node_addr, return_slot.clone()).await { // TODO async off to a thread pool
+                let exec_opts = executor::ExecOptions { node_addr, ..Default::default() };
+                match executor.begin_exec(&program_data, stdio_fwd, exec_opts, return_slot.clone()).await { // TODO async off to a thread pool
                   Ok(running_pid) => {
                     if crate::v_is_info() {
                       tracing::info!("Spawned PID {}", running_pid);
