@@ -14,6 +14,14 @@ pub async fn generate_private_key_ed25519_pem_file(out_path: &std::path::Path) -
 
     let private_key_pem = signing_key.to_pkcs8_pem(pkcs8::LineEnding::LF)?;
 
+    // Ensure the destination directory exists (the default keyfile path may point at a config dir
+    // that hasn't been created yet). Best-effort; the write below surfaces any real error.
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+    }
+
     tokio::fs::write(out_path, private_key_pem).await?;
 
     Ok(())

@@ -179,17 +179,30 @@ def guest_config_path(vm: dict) -> str:
 
 def guest_config_toml(vm: dict) -> str:
     """
-    Minimal weverywhere.toml for a testbed node. `serve` refuses to start without
-    a config file, so every guest gets one. The identity name is the hostname so
-    `weverywhere netmap` labels the node clearly; keyfile is a persistent path
-    populated by `generate-missing-keys` so the node trusts itself across reboots.
-    The keyfile is a TOML *literal* (single-quoted) string so Windows backslashes
-    need no escaping.
+    The weverywhere.toml content deployed to this guest's OS-specific config path
+    (see guest_config_path). `serve` refuses to start without a config file, so
+    every guest gets one.
+
+    If the VM entry sets the optional 'initial-weverywhere.toml' key, that string
+    is used verbatim - it lets you ahead-of-time configure exactly the identity,
+    trusted keys, and [[peer]] fabric you want to test on that server. Otherwise a
+    sensible default is generated (below).
+
+    Default: the identity name is the hostname so `weverywhere netmap` labels the
+    node clearly; keyfile is a persistent path populated by `generate-missing-keys`
+    so the node trusts itself across reboots. The keyfile is a TOML *literal*
+    (single-quoted) string so Windows backslashes need no escaping.
     The `[[peer]]` cross-links list every OTHER testbed VM by static IP, so each daemon knows the
     rest of the fabric and `weverywhere netmap` can walk a real multi-hop tree (host -> VM_A -> VM_B)
     instead of stopping at whoever it directly contacted. No `expected_key` is pinned, so these edges
     count as untrusted (the recursive forwarding depth stays conservative).
     """
+    # Explicit per-VM override wins: deploy exactly what the operator specified.
+    override = vm.get("initial-weverywhere.toml")
+    if override is not None:
+        # Guarantee a trailing newline so appends / cloud-init block scalars stay well-formed.
+        return override if override.endswith("\n") else override + "\n"
+
     peer_blocks = ""
     for other in all_vms():
         if other["hostname"] == vm["hostname"]:

@@ -12,6 +12,25 @@ VMS = [
       'os-packages': [
         'vim', 'cat'
       ],
+      'initial-weverywhere.toml': '''
+[identity]
+name = "win-test01-from-config-file"
+
+[limits.trusted]
+max_cpu_instructions = 4611686018427387904 # 2**62
+max_memory_bytes = 4611686018427387904
+
+[limits.untrusted]
+max_cpu_instructions = 65536
+max_memory_bytes = 65536
+
+[[peer]]
+ipv4 = "10.0.0.2"
+
+[[peer]]
+ipv4 = "10.0.10.2"
+
+''',
     },
     {
       'os': 'windows',

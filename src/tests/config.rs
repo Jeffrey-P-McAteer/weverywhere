@@ -1,4 +1,23 @@
-use crate::config::{Config, PeerMetadata};
+use crate::config::{Config, PeerMetadata, default_identity_keyfile};
+
+#[test]
+fn identity_keyfile_is_optional_and_defaults() {
+  // An ahead-of-time config (like a VM's initial-weverywhere.toml) may omit `keyfile`; it must
+  // still parse and fall back to the platform default so generate-missing-keys can populate it.
+  let cfg: Config = toml::from_str(
+    r#"
+      [identity]
+      name = "win-test01-from-config-file"
+
+      [[peer]]
+      ipv4 = "10.0.0.2"
+    "#,
+  )
+  .expect("config without keyfile should parse");
+  assert_eq!(cfg.identity.name, "win-test01-from-config-file");
+  assert_eq!(cfg.identity.keyfile, default_identity_keyfile());
+  assert_eq!(cfg.peer.len(), 1);
+}
 
 #[test]
 fn parses_all_forms_and_prefers_hostname_then_v6_then_v4() {

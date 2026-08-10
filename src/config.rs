@@ -254,9 +254,24 @@ fn toml_basic_string(s: &str) -> String {
 #[optionable(derive(Default, Debug, Clone, serde::Serialize, serde::Deserialize))]
 pub struct IdentityConfig {
   /// Human Name
+  #[serde(default)]
   pub name: String,
-  /// Private key file; TODO we will if/else on FIDO2/SmartCard/TPM data l8ter
+  /// Private key file; TODO we will if/else on FIDO2/SmartCard/TPM data l8ter.
+  /// Optional: when omitted it defaults to `identity.pem` next to the platform's default config
+  /// location (see [`default_identity_keyfile`]), so a hand-written config can leave it out and
+  /// still get a stable, per-machine identity that `generate-missing-keys` will populate.
+  #[serde(default = "default_identity_keyfile")]
   pub keyfile: std::path::PathBuf,
+}
+
+/// Default identity keyfile: `identity.pem` beside the platform's default `weverywhere.toml` (see
+/// `args::default_config_path`). Used when a config omits `[identity].keyfile`.
+pub fn default_identity_keyfile() -> std::path::PathBuf {
+  let cfg = crate::args::default_config_path();
+  match cfg.parent() {
+    Some(dir) => dir.join("identity.pem"),
+    None => std::path::PathBuf::from("weverywhere-identity.pem"),
+  }
 }
 
 
