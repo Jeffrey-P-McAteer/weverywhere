@@ -18,8 +18,13 @@
 // ---- host imports -----------------------------------------------------------------------------
 __attribute__((import_module("host"), import_name("arg_map_get")))
 int host_arg_map_get(const char* k, int kl, char* p, int cap);
+// Fill [ptr, ptr+len) with cryptographically-secure random bytes (a WASI module has no entropy of its
+// own); used to mint a per-message dedup nonce.
+__attribute__((import_module("host"), import_name("random")))
+int host_random(char* ptr, int len);
+// Append a message: id = per-message nonce for dedup, text = body. Host stamps the verified sender.
 __attribute__((import_module("host"), import_name("messages_push")))
-long long host_messages_push(const char* p, int n);
+long long host_messages_push(const char* id, int idlen, const char* text, int textlen);
 __attribute__((import_module("host"), import_name("messages_read")))
 int host_messages_read(long long after_seq, char* p, int cap);
 __attribute__((import_module("host"), import_name("replicate")))
@@ -53,6 +58,15 @@ static void tprint(const char* s){ host_tty_print(s, slen(s)); }
 
 // ---- small helpers ----------------------------------------------------------------------------
 static char argbuf[1024];
+static const char* HEX = "0123456789abcdef";
+
+// A fresh 16-hex-char random nonce, used to deduplicate the several network copies of one message.
+static char idhex[32];
+static void gen_id(void) {
+  unsigned char r[8];
+  host_random((char*)r, 8);
+  for (int i = 0; i < 8; i++) { idhex[2*i] = HEX[r[i] >> 4]; idhex[2*i+1] = HEX[r[i] & 0xf]; }
+}
 
 // Decode one CBOR head at p; returns header length, sets *major and *val. (Same decoder as the
 // messages selftest; handles the uint/bytes/text/array/map items our records use.)
@@ -76,16 +90,20 @@ static void cb_text(const char* s, int n){
   for(int i=0;i<n;i++) cb_b((unsigned char)s[i]);
 }
 
-// Broadcast the given text to the fabric by replicating a mode=deliver copy of ourselves.
+// Broadcast the given text to the fabric by replicating a mode=deliver copy of ourselves. A fresh
+// random id rides along so every node collapses the several copies of this one message into one.
 static void send_line(const char* text, int tlen){
+  gen_id();
   cbn=0;
   cb_b(0xa1);                 // map(1)
   cb_b(0x02);                 // key 2 (arg_map, flattened k,v)
-  cb_b(0x84);                 // array(4)
+  cb_b(0x86);                 // array(6)
   cb_text("mode",4);
   cb_text("deliver",7);
   cb_text("text",4);
   cb_text(text,tlen);
+  cb_text("id",2);
+  cb_text(idhex,16);
   host_replicate(0, (const char*)cb, cbn);
 }
 
@@ -104,7 +122,6 @@ static void append_line(const char* s, int n){
   line_count++;
 }
 
-static const char* HEX = "0123456789abcdef";
 static unsigned char rbuf[16384];
 
 // Read any new messages (seq > *after) and fold them into the transcript. Returns 1 if anything new.
@@ -225,9 +242,11 @@ void _start(void){
   int ml = host_arg_map_get("mode", 4, argbuf, (int)sizeof(argbuf));
   int is_deliver = (ml==7 && argbuf[0]=='d' && argbuf[1]=='e');
   if(is_deliver){
+    int il = host_arg_map_get("id", 2, idhex, (int)sizeof(idhex));
+    if(il<0) il=0;
     int tl = host_arg_map_get("text", 4, argbuf, (int)sizeof(argbuf));
     if(tl<0) tl=0;
-    host_messages_push(argbuf, tl);
+    host_messages_push(idhex, il, argbuf, tl);
     return;
   }
   // ui role (default): requires a terminal.

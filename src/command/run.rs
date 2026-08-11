@@ -100,21 +100,21 @@ pub async fn broadcast_program_to_fabric(
     .build()?;
   let bytes = serde_bare::to_vec(&messages::NetworkMessage::ExecuteRequest { program_data: pd })?;
 
-  // Multicast to every group on every interface with at least one address.
-  for (_idx, _name, iface_addrs) in net_utils::get_interfaces().into_iter() {
-    if iface_addrs.is_empty() { continue; }
-    for group in multicast_groups.iter() {
-      match group {
-        std::net::IpAddr::V4(g) => {
-          if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await {
-            let _ = sock.set_multicast_ttl_v4(4);
-            let _ = sock.send_to(&bytes, (*g, port)).await;
-          }
+  // Multicast each group ONCE (from the default route). We deliberately do not re-send per interface:
+  // without set_multicast_if every copy egresses the same route anyway, so per-interface sending just
+  // delivers the identical datagram N times. Cross-segment reach is covered by the unicast-to-peers
+  // pass below, and receivers dedup by message id regardless.
+  for group in multicast_groups.iter() {
+    match group {
+      std::net::IpAddr::V4(g) => {
+        if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await {
+          let _ = sock.set_multicast_ttl_v4(4);
+          let _ = sock.send_to(&bytes, (*g, port)).await;
         }
-        std::net::IpAddr::V6(g) => {
-          if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).await {
-            let _ = sock.send_to(&bytes, (*g, port)).await;
-          }
+      }
+      std::net::IpAddr::V6(g) => {
+        if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).await {
+          let _ = sock.send_to(&bytes, (*g, port)).await;
         }
       }
     }

@@ -113,14 +113,43 @@ pub struct MessageStore {
   next_seq: u64,
   msgs: std::collections::VecDeque<StoredMessage>,
   cap: usize,
+  /// Recently-seen dedup keys (sender pubkey ++ sender-chosen message id), newest at the back. The
+  /// same logical message reaches a node several times - multicast is emitted once per interface and
+  /// also overlaps the unicast-to-peers path - so we drop repeats of a (pubkey,id) we've already
+  /// recorded. A distinct message carries a fresh random id, so genuine repeats of the same text are
+  /// still kept. Messages pushed with an empty id (non-chat callers) are never deduped.
+  seen: std::collections::HashSet<Vec<u8>>,
+  seen_order: std::collections::VecDeque<Vec<u8>>,
+  seen_cap: usize,
 }
 
 impl MessageStore {
   pub fn new(cap: usize) -> MessageStore {
-    MessageStore { next_seq: 1, msgs: std::collections::VecDeque::with_capacity(cap.min(1024)), cap }
+    MessageStore {
+      next_seq: 1,
+      msgs: std::collections::VecDeque::with_capacity(cap.min(1024)),
+      cap,
+      seen: std::collections::HashSet::new(),
+      seen_order: std::collections::VecDeque::new(),
+      seen_cap: 4096,
+    }
   }
-  /// Append a message with the host-stamped verified identity; returns its assigned sequence number.
-  pub fn push(&mut self, from_name: String, from_pubkey: Vec<u8>, text: Vec<u8>, epoch_s: u64) -> u64 {
+  /// Append a message with the host-stamped verified identity, deduplicated by `(from_pubkey, id)`.
+  /// Returns the assigned sequence number, or 0 if this was a duplicate that was dropped. `id` is the
+  /// sender-chosen per-message nonce; pass an empty slice to disable dedup for this push.
+  pub fn push(&mut self, from_name: String, from_pubkey: Vec<u8>, id: &[u8], text: Vec<u8>, epoch_s: u64) -> u64 {
+    if !id.is_empty() {
+      let mut key = Vec::with_capacity(from_pubkey.len() + id.len());
+      key.extend_from_slice(&from_pubkey);
+      key.extend_from_slice(id);
+      if !self.seen.insert(key.clone()) {
+        return 0; // already seen this exact (sender, message) - a duplicate delivery
+      }
+      self.seen_order.push_back(key);
+      while self.seen_order.len() > self.seen_cap {
+        if let Some(old) = self.seen_order.pop_front() { self.seen.remove(&old); }
+      }
+    }
     let seq = self.next_seq;
     self.next_seq += 1;
     self.msgs.push_back(StoredMessage { seq, from_name, from_pubkey, text, epoch_s });
@@ -912,15 +941,19 @@ impl Executor {
           },
       ).map_err(map_loc_err!())?;
 
-      // host::messages_push(text_ptr, text_len) -> seq. Append a message to this node's message store.
-      // The host stamps the VERIFIED caller identity (name + pubkey, from the signature-checked source)
-      // and the current time; the guest supplies only the body. Returns the assigned sequence number.
-      // Open to all senders (chat is public) - trust is queried separately via host::trusts_key.
+      // host::messages_push(id_ptr, id_len, text_ptr, text_len) -> seq (0 if dropped as a duplicate).
+      // Append a message to this node's message store. The host stamps the VERIFIED caller identity
+      // (name + pubkey, from the signature-checked source) and the current time; the guest supplies a
+      // per-message id (a random nonce) plus the body. The id deduplicates the several copies of one
+      // message a node receives (multicast is emitted per interface and overlaps the unicast path);
+      // pass an empty id to disable dedup. Open to all senders (chat is public) - trust is a separate
+      // query via host::trusts_key.
       linker.func_wrap_async(
           "host",
           "messages_push",
-          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (text_ptr, text_len): (i32, i32)| {
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (id_ptr, id_len, text_ptr, text_len): (i32, i32, i32, i32)| {
             Box::new(async move {
+              let id = read_guest_bytes(&mut caller, id_ptr, id_len)?;
               let text = read_guest_bytes(&mut caller, text_ptr, text_len)?;
               let (name, pubkey, store) = {
                 let d = caller.data();
@@ -928,7 +961,7 @@ impl Executor {
               };
               let epoch = sys_utils::epoch_seconds_now_utc0();
               let seq = match store.lock() {
-                Ok(mut s) => s.push(name, pubkey, text, epoch),
+                Ok(mut s) => s.push(name, pubkey, &id, text, epoch),
                 Err(_) => 0,
               };
               Ok(seq as i64)

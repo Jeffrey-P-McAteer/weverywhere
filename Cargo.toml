@@ -21,6 +21,10 @@ include_directory = "0.1"
 
 getifs = "0.4"
 
+# Low-level socket options (SO_REUSEADDR/SO_REUSEPORT, IPV6_V6ONLY) that tokio's UdpSocket::bind
+# doesn't expose - needed so one listener per group can bind the shared port and join every NIC.
+socket2 = "0.5"
+
 glob = "0.3"
 
 # Cross-platform terminal control (raw mode, key events, styling) backing the host::tty_* driver.

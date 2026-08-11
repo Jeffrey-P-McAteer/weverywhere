@@ -31,84 +31,96 @@ pub fn spawn_listeners(
   port: u16,
 ) -> tokio::task::JoinSet<()> {
   let mut tasks = tokio::task::JoinSet::new();
-  for (iface_idx, iface_name, iface_addrs) in net_utils::get_interfaces().into_iter() {
-    for multicast_addr in multicast_group.iter() {
-      if iface_addrs.len() < 1 {
-        // We assume 0 addresses means no network connection, so we skip the interface entirely.
-        continue;
+  // One listener per multicast group (NOT per interface). A single reuse-bound socket joins the group
+  // on EVERY interface that has an address of the right family, so we receive multicast no matter which
+  // NIC it arrives on. The old per-(interface x group) design bound the same 0.0.0.0:port without
+  // SO_REUSEADDR, so every interface after the first failed with AddrInUse (silently), leaving the
+  // group joined on just one - usually the wrong - interface on multi-NIC / bridge+tap hosts.
+  let interfaces = std::sync::Arc::new(net_utils::get_interfaces());
+  for multicast_addr in multicast_group.iter() {
+    let multicast_addr = multicast_addr.clone();
+    let interfaces = interfaces.clone();
+    let executor = executor.clone();
+    let local_config = local_config.clone();
+    tasks.spawn(async move {
+      if let Err(e) = serve_group(&interfaces, &multicast_addr, port, executor, local_config).await {
+        tracing::warn!("[ serve_group ] Error serving group {} port {}: {:?}", multicast_addr, port, e);
       }
-      // Clone locals to appease async gods
-      let iface_idx = iface_idx.clone();
-      let iface_name = iface_name.clone();
-      let iface_addrs = iface_addrs.clone();
-      let multicast_addr = multicast_addr.clone();
-      let executor = executor.clone();
-      let local_config = local_config.clone();
-      tasks.spawn(async move {
-        if let Err(e) = serve_iface(iface_idx, &iface_name, &iface_addrs, &multicast_addr, port, executor, local_config).await {
-          if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-            if io_err.kind() == std::io::ErrorKind::AddrInUse {
-              return; // Don't bother warning, we see this w/ ipv6 link-local addresses.
-            }
-          }
-          tracing::warn!("[ serve_iface ] Error serving {:?} addr {:?} port {}: {:?}", iface_name, multicast_addr, port, e);
-        }
-      });
-    }
+    });
   }
   tasks
 }
 
+/// Bind a UDP socket on `0.0.0.0:port` (v4) or `[::]:port` (v6) with address/port reuse enabled, so
+/// several listeners (both families, this process's `chat` + a sibling `serve`, or another instance)
+/// can share the group+port instead of racing for an exclusive bind. The v6 socket is set v6-only so
+/// it doesn't collide with the v4 socket on the same port.
+fn bind_reuse_udp(is_v4: bool, port: u16) -> DynResult<tokio::net::UdpSocket> {
+  use socket2::{Domain, Protocol, Socket, Type};
+  let domain = if is_v4 { Domain::IPV4 } else { Domain::IPV6 };
+  let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(map_loc_err!())?;
+  sock.set_reuse_address(true).map_err(map_loc_err!())?; // let both families' listeners (and a sibling instance) share the group+port
+  let bind_addr: std::net::SocketAddr = if is_v4 {
+    (std::net::Ipv4Addr::UNSPECIFIED, port).into()
+  } else {
+    sock.set_only_v6(true).map_err(map_loc_err!())?;
+    (std::net::Ipv6Addr::UNSPECIFIED, port).into()
+  };
+  sock.set_nonblocking(true).map_err(map_loc_err!())?;
+  sock.bind(&bind_addr.into()).map_err(map_loc_err!())?;
+  Ok(tokio::net::UdpSocket::from_std(sock.into()).map_err(map_loc_err!())?)
+}
+
 #[allow(unreachable_code)]
-pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std::net::IpAddr>, multicast_addr: &std::net::IpAddr, port: u16, executor: std::sync::Arc<executor::Executor>, local_config: std::sync::Arc<config::Config>) -> DynResult<()> {
+pub async fn serve_group(interfaces: &[(u32, String, Vec<std::net::IpAddr>)], multicast_addr: &std::net::IpAddr, port: u16, executor: std::sync::Arc<executor::Executor>, local_config: std::sync::Arc<config::Config>) -> DynResult<()> {
   use tokio::net::ToSocketAddrs;
 
-  if crate::v_is_everything() {
-    tracing::warn!("Attemting to bind to {} - {: <18} address {} port {} (addresses - {:?})", iface_idx, iface_name, multicast_addr, port, iface_addrs);
+  let sock = bind_reuse_udp(multicast_addr.is_ipv4(), port)?;
+  let sock = std::sync::Arc::new(sock); // Allow us to send socket to many threads - we wrap in UdpSocketSender as recieving is racy from other threads!
+
+  if crate::v_is_info() {
+    tracing::warn!("Successfully bound group {} on port {}", multicast_addr, port);
   }
 
-  let empty_bind_addr_port = if multicast_addr.is_ipv4() {
-    (std::net::IpAddr::V4(core::net::Ipv4Addr::new(0, 0, 0, 0)), port )
-  }
-  else {
-    (std::net::IpAddr::V6(core::net::Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0)), port )
-  };
-
-  //let sock = tokio::net::UdpSocket::bind(empty_bind_addr_port).await.map_err(map_loc_err!())?;
-
-  if let Ok(sock) = tokio::net::UdpSocket::bind(empty_bind_addr_port).await {
-
-    let sock = std::sync::Arc::new(sock); // Allow us to send socket to many threads - we wrap in UdpSocketSender as recieving is racy from other threads!
-
-    if crate::v_is_info() {
-      tracing::warn!("Successfully bound to {} - {: <18} address {} port {} (addresses - {:?})", iface_idx, iface_name, multicast_addr, port, iface_addrs);
-    }
-
-    if multicast_addr.is_ipv4() {
+  // Join the group on every interface that carries an address (0 addresses = no connection, skip). A
+  // single socket can hold many memberships; joining them all is what lets us receive multicast that
+  // lands on any NIC. Per-interface join failures are logged but not fatal - one bad interface must not
+  // sink the whole listener (losing packets is acceptable; the fabric relies on retries).
+  let mut joined_any = false;
+  match multicast_addr {
+    std::net::IpAddr::V4(group) => {
       sock.set_multicast_loop_v4(true).map_err(map_loc_err!())?;
       sock.set_multicast_ttl_v4(4).map_err(map_loc_err!())?; // How many hops multicast can live for - default is just the immediate LAN we are attached to. TODO configure me from /etc/weveryware.toml l8ter
-    }
-    else {
-      sock.set_multicast_loop_v6(true).map_err(map_loc_err!())?;
-    }
-
-    match multicast_addr {
-      std::net::IpAddr::V4(multicast_addr) => {
-        if iface_addrs.len() > 0 {
-          for iface_addr in iface_addrs.iter() {
-            if let std::net::IpAddr::V4(iface_addr_v4) = iface_addr {
-              sock.join_multicast_v4(*multicast_addr, *iface_addr_v4).map_err(map_loc_err!())?;
+      for (_iface_idx, iface_name, iface_addrs) in interfaces.iter() {
+        for iface_addr in iface_addrs.iter() {
+          if let std::net::IpAddr::V4(iface_addr_v4) = iface_addr {
+            match sock.join_multicast_v4(*group, *iface_addr_v4) {
+              Ok(()) => { joined_any = true; if crate::v_is_info() { tracing::warn!("Joined {} on {} ({})", group, iface_name, iface_addr_v4); } }
+              Err(e) => { if crate::v_is_info() { tracing::warn!("Join {} on {} ({}) failed: {:?}", group, iface_name, iface_addr_v4, e); } }
             }
           }
         }
-        else {
-          sock.join_multicast_v4(*multicast_addr, core::net::Ipv4Addr::UNSPECIFIED).map_err(map_loc_err!())?;
-        }
       }
-      std::net::IpAddr::V6(multicast_addr) => {
-        sock.join_multicast_v6(multicast_addr, iface_idx).map_err(map_loc_err!())?;
+      if !joined_any {
+        // No usable per-interface address; fall back to the default-route interface so we still receive.
+        sock.join_multicast_v4(*group, core::net::Ipv4Addr::UNSPECIFIED).map_err(map_loc_err!())?;
+        joined_any = true;
       }
     }
+    std::net::IpAddr::V6(group) => {
+      sock.set_multicast_loop_v6(true).map_err(map_loc_err!())?;
+      for (iface_idx, iface_name, iface_addrs) in interfaces.iter() {
+        if iface_addrs.is_empty() { continue; }
+        match sock.join_multicast_v6(group, *iface_idx) {
+          Ok(()) => { joined_any = true; if crate::v_is_info() { tracing::warn!("Joined {} on {} (idx {})", group, iface_name, iface_idx); } }
+          Err(e) => { if crate::v_is_info() { tracing::warn!("Join {} on {} (idx {}) failed: {:?}", group, iface_name, iface_idx, e); } }
+        }
+      }
+    }
+  }
+  if !joined_any {
+    tracing::warn!("[ serve_group ] joined group {} on NO interfaces - will not receive multicast", multicast_addr);
+  }
 
     // A whole program arrives in one datagram, so this must be large enough to hold the biggest
     // ExecuteRequest we expect. UDP tops out near 64KiB; size to that so we don't silently truncate
@@ -211,7 +223,6 @@ pub async fn serve_iface(iface_idx: u32, iface_name: &str, iface_addrs: &Vec<std
         // tracing::warn!("{:?} bytes sent", len);
 
     }
-  }
 
   Ok(())
 }

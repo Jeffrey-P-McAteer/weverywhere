@@ -168,6 +168,42 @@ def setup_mingw_tools() -> None:
     print(f"Using mingw dlltool: {shutil.which('x86_64-w64-mingw32-dlltool')}")
 
 
+def setup_windows_import_libs() -> None:
+    """
+    winapi 0.3's `synchapi` feature (pulled in transitively by crossterm ->
+    crossterm_winapi -> winapi, which backs the host::tty_* terminal driver) makes
+    winapi's build.rs emit `-lsynchronization` unconditionally. But the only symbol
+    we actually use from that feature - WaitForMultipleObjects - lives in kernel32,
+    NOT in synchronization.dll (whose only unique exports are the WaitOnAddress /
+    WakeByAddress family, which nothing in our tree references). zig's bundled mingw
+    ships no import library for `synchronization`, so the cross-link fails to find
+    it.
+
+    Provide an EMPTY libsynchronization.a on the linker search path for the Windows
+    targets. It satisfies the spurious `-l` while contributing no symbols, so it
+    cannot accidentally resolve anything that kernel32 doesn't already provide (if a
+    real synchronization.dll symbol were ever needed we'd get a loud undefined-symbol
+    error instead of silently mis-linking). An empty archive is just the 8-byte ar
+    magic, so it is architecture-neutral and works for both windows-gnu and
+    windows-gnullvm.
+    """
+    cache = pathlib.Path.home() / ".cache" / "weverywhere_win_importlibs"
+    cache.mkdir(parents=True, exist_ok=True)
+    stub = cache / "libsynchronization.a"
+    if not stub.exists():
+        stub.write_bytes(b"!<arch>\n")  # a valid, empty ar archive
+
+    # Append (don't clobber) the search path to each Windows target's RUSTFLAGS.
+    link_flag = f"-L{cache}"
+    for var in (
+        "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS",
+        "CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_RUSTFLAGS",
+    ):
+        existing = os.environ.get(var, "")
+        os.environ[var] = f"{existing} {link_flag}".strip()
+    print(f"Using windows import-lib shim dir: {cache}")
+
+
 def setup_macos_sdk() -> None:
     """
     Linking the *-apple-darwin targets needs the macOS SDK (system frameworks
@@ -312,6 +348,7 @@ def main() -> None:
     # Only bootstrap the heavy per-OS toolchains we actually need.
     if any(t.startswith("windows") for t in selected):
         setup_mingw_tools()
+        setup_windows_import_libs()
     if any(t.startswith("macos") for t in selected):
         setup_macos_sdk()
 
