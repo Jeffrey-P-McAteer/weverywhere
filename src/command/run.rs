@@ -82,6 +82,31 @@ pub async fn run(args: &args::Args, file_path: &std::path::PathBuf, fabric: bool
 /// programs (e.g. the chat "ui" role fanning a "deliver" copy out to peers). The copy carries the
 /// given args and an empty discovery context (depth 0 / no visited), so recipients run it but don't
 /// themselves recurse unless their own logic calls replicate again.
+/// A UDP socket whose multicast egress interface is pinned to the NIC that owns `iface_addr` (via
+/// IP_MULTICAST_IF). Bound to an ephemeral port; TTL 4 and loopback on so a co-located listener still
+/// gets our own copy. tokio's UdpSocket can't set IP_MULTICAST_IF, so we go through socket2.
+fn new_multicast_sender_v4(iface_addr: std::net::Ipv4Addr) -> DynResult<tokio::net::UdpSocket> {
+  use socket2::{Domain, Protocol, Socket, Type};
+  let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).map_err(map_loc_err!())?;
+  sock.set_multicast_if_v4(&iface_addr).map_err(map_loc_err!())?;
+  sock.set_multicast_ttl_v4(4).map_err(map_loc_err!())?;
+  let _ = sock.set_multicast_loop_v4(true);
+  sock.set_nonblocking(true).map_err(map_loc_err!())?;
+  sock.bind(&std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)).into()).map_err(map_loc_err!())?;
+  Ok(tokio::net::UdpSocket::from_std(sock.into()).map_err(map_loc_err!())?)
+}
+
+/// IPv6 counterpart of [`new_multicast_sender_v4`], pinning the egress interface by index.
+fn new_multicast_sender_v6(iface_idx: u32) -> DynResult<tokio::net::UdpSocket> {
+  use socket2::{Domain, Protocol, Socket, Type};
+  let sock = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)).map_err(map_loc_err!())?;
+  sock.set_multicast_if_v6(iface_idx).map_err(map_loc_err!())?;
+  let _ = sock.set_multicast_loop_v6(true);
+  sock.set_nonblocking(true).map_err(map_loc_err!())?;
+  sock.bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)).into()).map_err(map_loc_err!())?;
+  Ok(tokio::net::UdpSocket::from_std(sock.into()).map_err(map_loc_err!())?)
+}
+
 pub async fn broadcast_program_to_fabric(
   wasm_bytes: &[u8],
   source: &config::IdentityData,
@@ -100,24 +125,41 @@ pub async fn broadcast_program_to_fabric(
     .build()?;
   let bytes = serde_bare::to_vec(&messages::NetworkMessage::ExecuteRequest { program_data: pd })?;
 
-  // Multicast each group ONCE (from the default route). We deliberately do not re-send per interface:
-  // without set_multicast_if every copy egresses the same route anyway, so per-interface sending just
-  // delivers the identical datagram N times. Cross-segment reach is covered by the unicast-to-peers
-  // pass below, and receivers dedup by message id regardless.
+  // Multicast each group out EVERY interface, pinning the egress with IP_MULTICAST_IF. A plain
+  // 0.0.0.0:0 send picks only the default-route interface, so hosts that straddle several segments (a
+  // physical LAN plus a VM bridge, say) deliver multicast to just one of them - the others never see
+  // it. Sending per interface reaches all segments; where copies overlap on a shared link, receivers
+  // collapse them via the (pubkey, id) dedup. Losing a copy is fine - senders/operators retry.
+  let interfaces = net_utils::get_interfaces();
+  let mut sent_any = false;
   for group in multicast_groups.iter() {
-    match group {
-      std::net::IpAddr::V4(g) => {
-        if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).await {
-          let _ = sock.set_multicast_ttl_v4(4);
-          let _ = sock.send_to(&bytes, (*g, port)).await;
+    for (idx, name, addrs) in interfaces.iter() {
+      // Send once per interface, pinning egress to that NIC. v4 selects the NIC by one of its
+      // addresses; v6 by interface index. An interface with no address of the group's family can't
+      // carry it, so it's skipped. Per-interface errors (down link, no multicast route) are logged
+      // but never abort the fan-out - reaching the other interfaces is what matters.
+      let sock = match group {
+        std::net::IpAddr::V4(_) => match addrs.iter().find_map(|a| match a { std::net::IpAddr::V4(v4) => Some(*v4), _ => None }) {
+          Some(iface_v4) => new_multicast_sender_v4(iface_v4),
+          None => continue,
+        },
+        std::net::IpAddr::V6(_) => {
+          if !addrs.iter().any(|a| a.is_ipv6()) { continue; }
+          new_multicast_sender_v6(*idx)
         }
-      }
-      std::net::IpAddr::V6(g) => {
-        if let Ok(sock) = tokio::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).await {
-          let _ = sock.send_to(&bytes, (*g, port)).await;
-        }
+      };
+      let sock = match sock {
+        Ok(s) => s,
+        Err(e) => { if crate::v_is_info() { tracing::warn!("[ multicast ] {} on {}: socket setup failed: {:?}", group, name, e); } continue; }
+      };
+      match sock.send_to(&bytes, (*group, port)).await {
+        Ok(n) => { sent_any = true; if crate::v_is_info() { tracing::warn!("[ multicast ] {} bytes -> {} via {}", n, group, name); } }
+        Err(e) => { if crate::v_is_info() { tracing::warn!("[ multicast ] {} via {} failed: {:?}", group, name, e); } }
       }
     }
+  }
+  if !sent_any {
+    tracing::warn!("[ multicast ] sent on NO interfaces (groups {:?}) - fabric got only unicast peers", multicast_groups);
   }
   // Unicast to every configured peer as well (covers hosts multicast can't reach).
   for peer in peers.iter() {
