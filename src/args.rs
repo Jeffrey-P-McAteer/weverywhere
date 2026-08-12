@@ -25,6 +25,13 @@ pub struct Args {
     #[arg(short, long)]
     pub config: Option<std::path::PathBuf>,
 
+    /// Write logs to this file instead of the terminal. When omitted, interactive commands (chat) log
+    /// nothing so the WASI program has full control of the screen, while non-interactive commands
+    /// (serve, run, ...) log to stderr as before. Verbosity (-v/-vv/-vvv) still controls how much
+    /// detail is written.
+    #[arg(long)]
+    pub log_file: Option<std::path::PathBuf>,
+
 }
 
 /// The platform's default system-wide config location, used when --config is not given and no
@@ -285,6 +292,16 @@ impl Args {
     }
     pub fn v_is_everything(&self) -> bool {
         return self.verbosity > 2;
+    }
+}
+
+impl Command {
+    /// True for commands that attach the real terminal and hand it to a WASI program (raw mode,
+    /// full-screen redraws via the host `tty_*` driver). While one of these is active the host must not
+    /// also write logs to that terminal, or the log lines bleed onto the program's frames (the TUI's
+    /// stdout and the logger's stderr are the same PTY). Used to pick a silent log writer by default.
+    pub fn owns_terminal(&self) -> bool {
+        matches!(self, Command::Chat { .. })
     }
 }
 

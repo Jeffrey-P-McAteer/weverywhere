@@ -29,7 +29,7 @@ fn main() {
     let mut args = args::Args::parse();
 
     GLOBAL_VERBOSITY.set(args.verbosity.into()).expect("Failed to assign GLOBAL_VERBOSITY");
-    let log_guard = init_logging();
+    let log_guard = init_logging(&args);
 
     if args.v_is_debug() {
         println!("args={:#?}", args);
@@ -105,10 +105,29 @@ pub fn v_is_everything() -> bool {
 }
 
 
-fn init_logging() -> tracing_appender::non_blocking::WorkerGuard {
+fn init_logging(args: &args::Args) -> tracing_appender::non_blocking::WorkerGuard {
 
-    // Set up an async writer to stderr
-    let (nb, guard) = tracing_appender::non_blocking(std::io::stderr());
+    // Choose a log destination that never fights a WASI program for the terminal:
+    //   * --log-file <PATH>       -> append there, whatever the command (debugging without screen spam).
+    //   * interactive command     -> discard, so the program owns the whole screen (chat's default).
+    //   * everything else         -> stderr, as before (serve/run don't own the terminal).
+    // Verbosity still governs *what* is emitted (the code gates on v_is_* / GLOBAL_VERBOSITY), so a
+    // higher -v just writes more detail to whichever sink we pick here.
+    let writer: Box<dyn std::io::Write + Send> = if let Some(path) = &args.log_file {
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(file) => Box::new(file),
+            Err(e) => {
+                eprintln!("weverywhere: could not open --log-file {:?} ({e}); logging disabled", path);
+                Box::new(std::io::sink())
+            }
+        }
+    } else if args.command.owns_terminal() {
+        Box::new(std::io::sink())
+    } else {
+        Box::new(std::io::stderr())
+    };
+
+    let (nb, guard) = tracing_appender::non_blocking(writer);
 
     tracing_subscriber::fmt()
         .with_writer(nb) // Log format config below
