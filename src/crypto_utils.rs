@@ -65,6 +65,24 @@ pub fn sign_bytes(priv_key: &ed25519_dalek::SigningKey, bytes: &mut[u8]) -> [u8;
     signature.to_bytes()
 }
 
+/// Lowercase hex encoding of raw bytes.
+pub fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Short, at-a-glance identifier for a public key: the first 4 bytes as 8 lowercase hex chars (e.g.
+/// "39ad4176"). This MUST match the short id the chat program renders — chat.c prints the first 4
+/// bytes of the sender's pubkey as hex — so the same identity is recognizable across chat, netmap,
+/// and the daemon's security logs. Short ids CAN collide; anywhere identity matters, disambiguate
+/// with the full key (netmap prints both; logs print the full key).
+pub fn short_id(pubkey: &[u8]) -> String {
+    to_hex(&pubkey[..pubkey.len().min(4)])
+}
+
 pub fn signature_is_valid(verifying_key: ed25519_dalek::VerifyingKey, message_bytes: &[u8], signature_bytes: &[u8; ed25519_dalek::Signature::BYTE_SIZE]) -> bool {
     match verifying_key.verify_strict(message_bytes, &ed25519_dalek::Signature::from_bytes(signature_bytes)) {
         Ok(()) => {

@@ -36,6 +36,24 @@ pub enum NetworkMessage {
     request_uuid: [u8; 16],
     cbor_data: Vec<u8>,
   },
+
+  /// A signed application message broadcast on the fabric WITHOUT shipping a program - the lightweight
+  /// alternative to wrapping every chat line in a whole ExecuteRequest. Emitted by `host::messages_send`
+  /// and appended (as verified sender + payload) to each receiver's message store.
+  ///
+  /// * `source`    - the sender's self-signed identity (its self-signature proves possession of the key
+  ///                 behind `encoded_public_key`; that key + `human_name` become the VERIFIED sender).
+  /// * `id`        - a random per-send nonce; receivers collapse the several network copies of one send
+  ///                 by `(source pubkey, id)` (see [`crate::executor::MessageStore`]).
+  /// * `cbor_data` - the payload, a CBOR *list or map* (never a bare scalar/string).
+  /// * `signature` - ed25519 over `SHA-256(id ++ cbor_data)` by the source key, binding the payload to
+  ///                 the sender so it can't be altered or replayed under a different body.
+  SignedFabricMessage {
+    source: config::IdentityData,
+    id: Vec<u8>,
+    cbor_data: Vec<u8>,
+    signature: Vec<u8>,
+  },
 }
 
 

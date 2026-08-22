@@ -124,12 +124,23 @@ pub async fn broadcast_program_to_fabric(
     .set_args(arg_list, arg_map)
     .build()?;
   let bytes = serde_bare::to_vec(&messages::NetworkMessage::ExecuteRequest { program_data: pd })?;
+  broadcast_bytes_to_fabric(&bytes, multicast_groups, port, peers).await
+}
 
-  // Multicast each group out EVERY interface, pinning the egress with IP_MULTICAST_IF. A plain
-  // 0.0.0.0:0 send picks only the default-route interface, so hosts that straddle several segments (a
-  // physical LAN plus a VM bridge, say) deliver multicast to just one of them - the others never see
-  // it. Sending per interface reaches all segments; where copies overlap on a shared link, receivers
-  // collapse them via the (pubkey, id) dedup. Losing a copy is fine - senders/operators retry.
+/// Fan an already-serialized `NetworkMessage` out onto the fabric: multicast each group out EVERY
+/// interface (egress pinned via IP_MULTICAST_IF) and unicast it to every configured peer. Shared by the
+/// program-shipping path ([`broadcast_program_to_fabric`]) and the lightweight signed-message path
+/// (`host::messages_send`), so both reach every segment identically. Receivers collapse the overlapping
+/// copies via the `(pubkey, id)` dedup; losing a copy is acceptable - senders/operators retry.
+pub async fn broadcast_bytes_to_fabric(
+  bytes: &[u8],
+  multicast_groups: &[std::net::IpAddr],
+  port: u16,
+  peers: &[config::PeerMetadata],
+) -> DynResult<()> {
+  // A plain 0.0.0.0:0 send picks only the default-route interface, so hosts that straddle several
+  // segments (a physical LAN plus a VM bridge, say) would deliver multicast to just one of them.
+  // Sending per interface, pinned to that NIC, reaches all segments.
   let interfaces = net_utils::get_interfaces();
   let mut sent_any = false;
   for group in multicast_groups.iter() {
@@ -152,7 +163,7 @@ pub async fn broadcast_program_to_fabric(
         Ok(s) => s,
         Err(e) => { if crate::v_is_info() { tracing::warn!("[ multicast ] {} on {}: socket setup failed: {:?}", group, name, e); } continue; }
       };
-      match sock.send_to(&bytes, (*group, port)).await {
+      match sock.send_to(bytes, (*group, port)).await {
         Ok(n) => { sent_any = true; if crate::v_is_info() { tracing::warn!("[ multicast ] {} bytes -> {} via {}", n, group, name); } }
         Err(e) => { if crate::v_is_info() { tracing::warn!("[ multicast ] {} via {} failed: {:?}", group, name, e); } }
       }
@@ -170,7 +181,7 @@ pub async fn broadcast_program_to_fabric(
         (std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
       };
       if let Ok(sock) = tokio::net::UdpSocket::bind(bind).await {
-        let _ = sock.send_to(&bytes, addr).await;
+        let _ = sock.send_to(bytes, addr).await;
       }
     }
   }

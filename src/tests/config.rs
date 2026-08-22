@@ -94,3 +94,39 @@ fn pinned_toml_round_trips_back_into_config() {
   .expect("generated [[peer]] block should be valid TOML");
   assert_eq!(cfg.peer[0].expected_key_str(), Some("ssh-ed25519 AAAAOBSERVED"));
 }
+
+#[test]
+fn signed_message_payload_roundtrips_and_detects_tampering() {
+  // Backs host::messages_send / SignedFabricMessage: a payload signed by an identity's key must
+  // verify against that identity, and any change to the payload, nonce, or signer must fail.
+  use crate::config::IdentityData;
+  use ed25519_dalek::SigningKey;
+  use rand::rngs::OsRng;
+
+  let signing = SigningKey::generate(&mut OsRng);
+  let pubkey = signing.verifying_key().as_bytes().to_vec();
+  // A minimal identity whose encoded_public_key is the verifying key (the fields verify_payload uses).
+  let identity = IdentityData {
+    human_name: "alice".into(),
+    generated_at_utc0_epoch_s: 1_760_000_000,
+    validity_s: u16::MAX,
+    encoded_public_key_fmt: "ed25519".into(),
+    encoded_public_key: pubkey.clone(),
+    signature: vec![],
+  };
+
+  let id = [7u8; 16];
+  let payload = b"\x81\x64test"; // CBOR: array(1) [ "test" ]
+  let sig = IdentityData::sign_payload(&signing, &id, payload).to_bytes().to_vec();
+
+  // Genuine message verifies.
+  assert!(identity.verify_payload(&id, payload, &sig).is_ok());
+  // Tampered body fails.
+  assert!(identity.verify_payload(&id, b"\x81\x64evil", &sig).is_err());
+  // Different nonce (replay under a new id) fails.
+  assert!(identity.verify_payload(&[9u8; 16], payload, &sig).is_err());
+  // A different signer's key can't be forged onto our identity.
+  let other = SigningKey::generate(&mut OsRng);
+  let other_sig = IdentityData::sign_payload(&other, &id, payload).to_bytes().to_vec();
+  assert!(identity.verify_payload(&id, payload, &other_sig).is_err());
+}

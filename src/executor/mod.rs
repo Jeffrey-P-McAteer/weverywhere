@@ -171,6 +171,11 @@ pub struct ExecOptions {
   pub node_addr: Option<String>,
   /// Sink for `host::replicate` requests; `None` disables replication on this host.
   pub replicate_tx: Option<tokio::sync::mpsc::UnboundedSender<ReplicateRequest>>,
+  /// Sink for `host::messages_send`: ready-to-transmit serialized `NetworkMessage::SignedFabricMessage`
+  /// bytes the launcher fans out onto the fabric. `None` disables message sending on this host (the
+  /// call then no-ops with -1). This is how a program broadcasts a signed message without re-shipping
+  /// itself, unlike `replicate_tx`.
+  pub fabric_send_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
   /// An attached interactive terminal, exposed via the `host::tty_*` imports; `None` = no terminal.
   pub tty: Option<std::sync::Arc<crate::tty::TtyHandle>>,
   /// Run without the instruction (fuel) cap. Required for long-lived interactive programs, which
@@ -395,6 +400,12 @@ pub struct RPStoreData {
   /// that owns this program drains the channel and performs the send. `None` when the current host
   /// doesn't support replication (the call then no-ops with -1).
   pub replicate_tx: Option<tokio::sync::mpsc::UnboundedSender<ReplicateRequest>>,
+  /// Where `host::messages_send` deposits ready-to-transmit signed message bytes for the launcher to
+  /// fan out onto the fabric. `None` when this host can't send (call no-ops with -1).
+  pub fabric_send_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+  /// This node's own signed identity, used as the `source` on messages sent via `host::messages_send`.
+  /// `None` when the node has no identity key (message sending then no-ops).
+  pub identity_data: Option<config::IdentityData>,
   /// An attached interactive terminal for the `host::tty_*` imports; `None` when not running in a UI
   /// context (the tty imports then report "no terminal").
   pub tty: Option<std::sync::Arc<crate::tty::TtyHandle>>,
@@ -590,6 +601,18 @@ impl Executor {
     });
   }
 
+  /// Append a signed fabric message (see [`messages::NetworkMessage::SignedFabricMessage`]) to this
+  /// node's message store after the caller has verified both the sender's self-signature and the
+  /// payload signature. The verified `from_name`/`from_pubkey` are stamped by the host (never guest
+  /// data); `payload` is the opaque CBOR body the sender broadcast. Deduplicated by `(pubkey, id)`;
+  /// returns the assigned sequence number, or 0 if it was a duplicate that was dropped.
+  pub fn record_fabric_message(&self, from_name: String, from_pubkey: Vec<u8>, id: &[u8], payload: Vec<u8>, epoch_s: u64) -> u64 {
+    match self.messages.lock() {
+      Ok(mut s) => s.push(from_name, from_pubkey, id, payload, epoch_s),
+      Err(_) => 0,
+    }
+  }
+
   pub async fn begin_exec(&self, program: &ProgramData, stdio_forwarder: executor::wasi_adapters::WasiStdioSimpleForwarder, opts: ExecOptions, return_slot: std::sync::Arc<std::sync::Mutex<ExecReturn>>) -> DynResult<u64> {
     // Check 1: Is the program signature valid, given the identity it claims to have been signed by?
     match program.source.check_self_signature() {
@@ -687,6 +710,8 @@ impl Executor {
       messages: self.messages.clone(),
       trusted_pubkeys: self.trusted_keys.iter().map(|kv| kv.value().as_bytes().to_vec()).collect(),
       replicate_tx: opts.replicate_tx,
+      fabric_send_tx: opts.fabric_send_tx,
+      identity_data: self.identity_data.clone(),
       tty: opts.tty,
       depth: program.visited.len() as u32,
       node_addr: opts.node_addr,
@@ -1023,6 +1048,47 @@ impl Executor {
               match &caller.data().replicate_tx {
                 Some(tx) => Ok(if tx.send(req).is_ok() { 0i32 } else { -1i32 }),
                 None => Ok(-1i32),
+              }
+            })
+          },
+      ).map_err(map_loc_err!())?;
+
+      // host::messages_send(cbor_ptr, cbor_len) -> 0 (queued) | negative on error. Broadcast a SIGNED
+      // application message onto the fabric WITHOUT shipping a program (the lightweight alternative to
+      // host::replicate for chat-style messaging). `cbor` MUST be a CBOR list or map - a bare scalar or
+      // string is rejected (-2); wrap a lone string as a one-element list. The host mints a random dedup
+      // nonce, signs SHA-256(nonce ++ cbor) with THIS node's identity key, wraps it in a
+      // NetworkMessage::SignedFabricMessage carrying our self-signed identity, and hands the serialized
+      // bytes to the launcher to fan out. Errors: -1 no send sink / no identity key, -2 payload not a
+      // list/map, -3 serialization failed.
+      linker.func_wrap_async(
+          "host",
+          "messages_send",
+          move |mut caller: wasmtime::Caller<'_, RPStoreData>, (cbor_ptr, cbor_len): (i32, i32)| {
+            Box::new(async move {
+              let payload = read_guest_bytes(&mut caller, cbor_ptr, cbor_len)?;
+              // Enforce "no bare strings": the top-level CBOR item must be an array (major 4) or map
+              // (major 5). Anything else (incl. text/byte strings and integers) is rejected.
+              match payload.first().map(|b| b >> 5) {
+                Some(4) | Some(5) => {}
+                _ => return Ok(-2i32),
+              }
+              let (source, signing_key, tx) = {
+                let d = caller.data();
+                match (&d.identity_data, &d.signing_key, &d.fabric_send_tx) {
+                  (Some(src), Some(key), Some(tx)) => (src.clone(), key.clone(), tx.clone()),
+                  _ => return Ok(-1i32),
+                }
+              };
+              let mut id = [0u8; 16];
+              { use rand::RngCore; rand::rngs::OsRng.fill_bytes(&mut id); }
+              let signature = config::IdentityData::sign_payload(&signing_key, &id, &payload).to_bytes().to_vec();
+              let msg = messages::NetworkMessage::SignedFabricMessage {
+                source, id: id.to_vec(), cbor_data: payload, signature,
+              };
+              match serde_bare::to_vec(&msg) {
+                Ok(bytes) => Ok(if tx.send(bytes).is_ok() { 0i32 } else { -1i32 }),
+                Err(_) => Ok(-3i32),
               }
             })
           },
@@ -1446,13 +1512,8 @@ fn decode_replicate_args(bytes: &[u8]) -> (Vec<String>, Vec<(String, String)>) {
 }
 
 /// Lowercase hex encoding, used to key peers by their public key and to render keys for programs.
-fn to_hex(bytes: &[u8]) -> String {
-  let mut s = String::with_capacity(bytes.len() * 2);
-  for b in bytes {
-    s.push_str(&format!("{:02x}", b));
-  }
-  s
-}
+// Shared with netmap + the daemon's security logs so identity hex is rendered identically everywhere.
+use crate::crypto_utils::to_hex;
 
 /// Best-effort OS hostname, resolved by shelling out to the `hostname` command (present on Linux,
 /// macOS, and Windows). Falls back to "unknown-host" so a missing tool never breaks the executor.

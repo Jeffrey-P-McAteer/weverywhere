@@ -1,5 +1,25 @@
 use super::*;
 
+/// Emit an always-on, structured security-audit line for a signed fabric event, so external log
+/// consumers can track identities by their unforgeable FULL public key and flag imposters across
+/// every application on the fabric. `short` is the same 8-hex short-id shown in chat and netmap
+/// (`crypto_utils::short_id`); `pubkey` is the complete ed25519 key. A GOOD verdict logs at info, a
+/// BAD one (forged identity, tampering, or replay) at warn so alerts stand out - but both carry the
+/// `weverywhere::security` target and a `[security]` tag so a SIEM can capture the full stream.
+/// These are NOT gated on verbosity: security auditing must be reliable regardless of `-v`.
+fn log_sig_event(kind: &str, ok: bool, addr: std::net::SocketAddr, source: &config::IdentityData, detail: &str) {
+  let short = crypto_utils::short_id(&source.encoded_public_key);
+  let pubkey = crypto_utils::to_hex(&source.encoded_public_key);
+  let verdict = if ok { "GOOD" } else { "BAD" };
+  let name = &source.human_name;
+  if ok {
+    tracing::info!(target: "weverywhere::security",
+      "[security] sig={verdict} kind={kind} addr={addr} short={short} pubkey={pubkey} name={name:?}{detail}");
+  } else {
+    tracing::warn!(target: "weverywhere::security",
+      "[security] sig={verdict} kind={kind} addr={addr} short={short} pubkey={pubkey} name={name:?}{detail}");
+  }
+}
 
 #[allow(unreachable_code)]
 pub async fn serve(args: &args::Args, multicast_group: args::MulticastAddressVec, port: u16) -> DynResult<()> {
@@ -141,6 +161,15 @@ pub async fn serve_group(interfaces: &[(u32, String, Vec<std::net::IpAddr>)], mu
           Ok(network_message) => {
             match network_message {
               messages::NetworkMessage::ExecuteRequest { program_data } => {
+                // Security audit: record who asked us to run a program, by full public key, and whether
+                // their identity self-signature checks out. (Whether the program is actually allowed to
+                // DO anything is enforced later via host::trusts_me against our trusted-keys set.)
+                match program_data.source.check_self_signature() {
+                  Ok(()) => log_sig_event("execute-req", true, addr, &program_data.source,
+                    &format!(" program={:?}", program_data.human_name)),
+                  Err(e) => log_sig_event("execute-req", false, addr, &program_data.source,
+                    &format!(" program={:?} error=bad-identity-sig detail={e:?}", program_data.human_name)),
+                }
                 if crate::v_is_info() {
                   tracing::warn!("Recieved ExecuteRequest: {:?}", &program_data.human_name );
                 }
@@ -205,6 +234,26 @@ pub async fn serve_group(interfaces: &[(u32, String, Vec<std::net::IpAddr>)], mu
                   Err(e) => {
                     tracing::info!("e = {:?}", e);
                   }
+                }
+              }
+              messages::NetworkMessage::SignedFabricMessage { source, id, cbor_data, signature } => {
+                // A lightweight signed message (no program shipped). Verify BOTH the sender's identity
+                // self-signature AND the payload signature before trusting the name/pubkey, then append
+                // to our store for the local UI to read. Bad signatures are dropped, not executed.
+                if let Err(e) = source.check_self_signature() {
+                  // Identity self-signature failed: the claimed name/pubkey are unverified (a forged
+                  // identity). Log the CLAIMED key anyway so imposters using it are tracked.
+                  log_sig_event("fabric-msg", false, addr, &source, &format!(" error=bad-identity-sig detail={e:?}"));
+                } else if let Err(e) = source.verify_payload(&id, &cbor_data, &signature) {
+                  // Identity is genuine but the payload signature doesn't match: tampering or replay
+                  // under this key.
+                  log_sig_event("fabric-msg", false, addr, &source, &format!(" error=bad-payload-sig detail={e:?}"));
+                } else {
+                  log_sig_event("fabric-msg", true, addr, &source, "");
+                  executor.note_peer(addr, &source);
+                  let epoch = sys_utils::epoch_seconds_now_utc0();
+                  let seq = executor.record_fabric_message(source.human_name.clone(), source.encoded_public_key.clone(), &id, cbor_data, epoch);
+                  if crate::v_is_info() { tracing::info!("SignedFabricMessage from {:?} stored as seq {}", source.human_name, seq); }
                 }
               }
               unused => {

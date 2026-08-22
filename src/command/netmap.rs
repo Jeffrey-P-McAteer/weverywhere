@@ -270,6 +270,8 @@ fn print_network_map(you: &str, our_pubkey: &[u8], replies: &[(SocketAddr, Vec<u
   println!("weverywhere network map");
   println!("  you = {}", you);
   println!("  legend:  <3 = node trusts you    x = node does NOT trust you    (!) = unverified/expired");
+  println!("  nodes show as  hostname (short-id) @ addr;  short-id matches the chat name and its full");
+  println!("  public key is listed below the tree (a short-id can collide - always verify the full key)");
   println!();
 
   if nodes.is_empty() {
@@ -293,7 +295,11 @@ fn print_network_map(you: &str, our_pubkey: &[u8], replies: &[(SocketAddr, Vec<u
     });
   }
 
-  println!("(you) {}", you);
+  if our_pubkey.is_empty() {
+    println!("(you) {}", you);
+  } else {
+    println!("(you) {} ({})", you, crypto_utils::short_id(our_pubkey));
+  }
   // Roots are nodes whose parent is us (or whose parent we never heard from).
   let mut roots: Vec<Vec<u8>> = nodes.keys()
     .filter(|pk| {
@@ -304,23 +310,72 @@ fn print_network_map(you: &str, our_pubkey: &[u8], replies: &[(SocketAddr, Vec<u
     .collect();
   roots.sort_by(|a, b| nodes[a].hostname.cmp(&nodes[b].hostname));
 
+  // First pass: build every row's tree portion so we can align the trust column into a single column
+  // regardless of how deep (and therefore how wide) each branch is.
   let mut printed: HashSet<Vec<u8>> = HashSet::new();
+  let mut rows: Vec<Row> = Vec::new();
   let root_count = roots.len();
   for (i, pk) in roots.iter().enumerate() {
-    print_subtree(pk, &nodes, &children, "", i + 1 == root_count, &mut printed);
+    collect_rows(pk, &nodes, &children, "", i + 1 == root_count, &mut printed, &mut rows);
+  }
+
+  // Second pass: pad each tree portion to the widest one, then print the aligned trust column.
+  let tree_width = rows.iter().map(|r| r.tree.chars().count()).max().unwrap_or(0);
+  for row in &rows {
+    let pad = tree_width - row.tree.chars().count();
+    println!("{}{:pad$}   [{}]{}", row.tree, "", row.trust_mark, row.warn, pad = pad);
+  }
+
+  // Full public keys, so a short-id (as shown in the tree and in chat) can be verified against the
+  // unforgeable full ed25519 key. A hostname or short-id can be claimed by anyone; only the full key
+  // is unique. Include ourselves so a user can confirm their own chat short-id too.
+  let mut ids: Vec<(Vec<u8>, String, bool)> = Vec::new();
+  if !our_pubkey.is_empty() {
+    ids.push((our_pubkey.to_vec(), you.to_string(), true));
+  }
+  for (pk, node) in nodes.iter() {
+    ids.push((pk.clone(), node.hostname.clone(), false));
+  }
+  ids.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+  // Flag short-id collisions (distinct full keys sharing a short-id) - a hint of possible impersonation.
+  let mut short_counts: HashMap<String, usize> = HashMap::new();
+  for (pk, _, _) in &ids {
+    *short_counts.entry(crypto_utils::short_id(pk)).or_default() += 1;
+  }
+
+  println!();
+  println!("public keys (verify a chat/netmap short-id against the full key here):");
+  for (pk, hostname, is_you) in &ids {
+    let short = crypto_utils::short_id(pk);
+    let you_mark = if *is_you { " (you)" } else { "" };
+    let collision = if short_counts[&short] > 1 { "   (!) SHARED SHORT-ID - verify full key" } else { "" };
+    println!("  {}  {}  {}{}{}", short, crypto_utils::to_hex(pk), hostname, you_mark, collision);
   }
   println!();
 }
 
-/// Recursively print one node and its children with box-drawing indentation, guarding against cycles
-/// via `printed` (a node reached by two paths is only shown once).
-fn print_subtree(
+/// One rendered tree line, split so the trust column can be aligned across the whole tree.
+struct Row {
+  /// The tree portion: prefix + branch + `hostname (short-id) @ addr`.
+  tree: String,
+  /// Trust indicator (`<3` / `x`) shown in the aligned column.
+  trust_mark: &'static str,
+  /// Trailing warning marker (` (!)`) for unverified/expired records, or empty.
+  warn: &'static str,
+}
+
+/// Recursively build one node's row and its children's rows with box-drawing indentation, guarding
+/// against cycles via `printed` (a node reached by two paths is only shown once). Rows are collected
+/// rather than printed so the caller can align the trust column across the whole tree.
+fn collect_rows(
   pk: &[u8],
   nodes: &HashMap<Vec<u8>, Node>,
   children: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
   prefix: &str,
   is_last: bool,
   printed: &mut HashSet<Vec<u8>>,
+  rows: &mut Vec<Row>,
 ) {
   let node = match nodes.get(pk) { Some(n) => n, None => return };
   if !printed.insert(pk.to_vec()) {
@@ -332,14 +387,18 @@ fn print_subtree(
   // Prefer the node's self-reported address; fall back to the datagram source (which for a relayed
   // record is the intermediate daemon, not this node).
   let addr = node.node_addr.clone().unwrap_or_else(|| node.responder.to_string());
-  println!("{}{} {} @ {}   [{}]{}", prefix, branch, node.hostname, addr, trust_mark, warn);
+  rows.push(Row {
+    tree: format!("{}{} {} ({}) @ {}", prefix, branch, node.hostname, crypto_utils::short_id(pk), addr),
+    trust_mark,
+    warn,
+  });
 
   let child_prefix = format!("{}{}", prefix, if is_last { "    " } else { "|   " });
   if let Some(kids) = children.get(pk) {
     let kids: Vec<&Vec<u8>> = kids.iter().filter(|k| !printed.contains(*k)).collect();
     let n = kids.len();
     for (i, child) in kids.into_iter().enumerate() {
-      print_subtree(child, nodes, children, &child_prefix, i + 1 == n, printed);
+      collect_rows(child, nodes, children, &child_prefix, i + 1 == n, printed, rows);
     }
   }
 }

@@ -41,24 +41,17 @@ pub async fn chat(
   // store, which the UI program reads. Left running in the background (we don't join the set).
   let mut listeners = serve::spawn_listeners(executor.clone(), local_config_arc.clone(), multicast_groups.clone(), port);
 
-  // host::replicate sink: the UI deposits `deliver` copies here; this task broadcasts each onto the
-  // fabric (multicast + peers), carrying the same chat wasm signed by our identity.
-  let (replicate_tx, mut replicate_rx) = tokio::sync::mpsc::unbounded_channel::<executor::ReplicateRequest>();
-  let drain = {
-    let wasm_bytes = wasm_bytes.clone();
-    let source = source.clone();
+  // host::messages_send sink: the UI deposits ready-to-transmit signed message bytes here; this task
+  // fans each out onto the fabric (multicast every interface + peers). No program is shipped - the
+  // message is a small signed SignedFabricMessage, not a whole copy of the chat wasm.
+  let (fabric_send_tx, mut fabric_send_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+  let mut drain = {
     let groups: Vec<std::net::IpAddr> = multicast_groups.iter().copied().collect();
     let peers = local_config.peer.clone();
     tokio::spawn(async move {
-      while let Some(req) = replicate_rx.recv().await {
-        match req.scope {
-          executor::ReplicateScope::Fabric => {
-            if let Err(e) = run::broadcast_program_to_fabric(
-              &wasm_bytes, &source, EMBEDDED_CHAT_NAME, req.arg_list, req.arg_map, &groups, port, &peers,
-            ).await {
-              tracing::warn!("[ chat ] replicate failed: {:?}", e);
-            }
-          }
+      while let Some(bytes) = fabric_send_rx.recv().await {
+        if let Err(e) = run::broadcast_bytes_to_fabric(&bytes, &groups, port, &peers).await {
+          tracing::warn!("[ chat ] message send failed: {:?}", e);
         }
       }
     })
@@ -74,7 +67,7 @@ pub async fn chat(
   let return_slot = std::sync::Arc::new(std::sync::Mutex::new(executor::ExecReturn::default()));
   let opts = executor::ExecOptions {
     tty: Some(tty_handle),
-    replicate_tx: Some(replicate_tx),
+    fabric_send_tx: Some(fabric_send_tx),
     uncapped_fuel: true,
     ..Default::default()
   };
@@ -87,6 +80,9 @@ pub async fn chat(
   // restores the terminal.
   let _ = executor.wait_for_pid_exit(pid).await;
   listeners.abort_all();
+  // Give the send sink a moment to fan out any final message (notably the leave notice the UI emits
+  // as it exits) before we tear the drain task down.
+  let _ = tokio::time::timeout(std::time::Duration::from_millis(300), &mut drain).await;
   drain.abort();
   Ok(())
 }

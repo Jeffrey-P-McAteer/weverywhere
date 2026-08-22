@@ -393,6 +393,37 @@ impl IdentityData {
     std::unimplemented!()
   }
 
+  /// Sign an application-message payload: ed25519 over `SHA-256(id ++ payload)`. `id` is a fixed-length
+  /// per-message nonce, so the concatenation is unambiguous. Used by `host::messages_send` to bind a
+  /// [`crate::messages::NetworkMessage::SignedFabricMessage`] body to this identity's key.
+  pub fn sign_payload(signing_key: &ed25519_dalek::SigningKey, id: &[u8], payload: &[u8]) -> ed25519_dalek::Signature {
+    use ed25519_dalek::Signer;
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(id);
+    hasher.update(payload);
+    signing_key.sign(&hasher.finalize())
+  }
+
+  /// Verify a payload signature produced by [`IdentityData::sign_payload`] against THIS identity's
+  /// public key. Returns `Ok(())` only when the signature matches, so a receiver can trust that
+  /// `payload` really came from `self` unaltered. Call `check_self_signature` first to confirm the key
+  /// itself is validly self-attested.
+  pub fn verify_payload(&self, id: &[u8], payload: &[u8], signature: &[u8]) -> DynResult<()> {
+    use ed25519_dalek::Verifier;
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(id);
+    hasher.update(payload);
+    let hash = hasher.finalize();
+
+    let pub_key_32: [u8; 32] = self.encoded_public_key.as_slice().try_into().map_err(map_loc_err!())?;
+    let public_key = ed25519_dalek::VerifyingKey::from_bytes(&pub_key_32).map_err(map_loc_err!())?;
+    let signature = ed25519_dalek::Signature::from_slice(signature).map_err(map_loc_err!())?;
+    public_key.verify(&hash, &signature).map_err(map_loc_err!())?;
+    Ok(())
+  }
+
 }
 
 

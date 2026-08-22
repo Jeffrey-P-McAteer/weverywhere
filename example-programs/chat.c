@@ -1,34 +1,33 @@
 // COMPILE: zig cc -Os -target wasm32-wasi -mexec-model=reactor THIS_FILE -o OUT_FILE
 
-// chat: the weverywhere interactive chat program. ONE program body with two roles, selected by the
-// `mode` argument the launcher (or a replicated copy) passes:
+// chat: the weverywhere interactive chat program. A SINGLE interactive role - there is no longer a
+// "deliver" carrier copy, and the program never replicates itself. It:
 //
-//   * mode=ui      - the interactive role. Runs on the local `weverywhere chat` host with a terminal
-//                    attached: draws the transcript, reads the keyboard, and on each entered line
-//                    sends a copy of ITSELF (mode=deliver) onto the whole fabric via host::replicate.
-//   * mode=deliver - the carrier role. Runs on every node that receives the broadcast copy; it reads
-//                    the message text from its args and appends it to that node's message store via
-//                    host::messages_push. The host stamps the VERIFIED sender name + public key, so a
-//                    chat handle cannot be forged - impersonation is prevented by the signed identity
-//                    on the request, which is exactly the trust the chat program relies on.
+//   * draws the transcript and reads the keyboard on the local `weverywhere chat` host, and
+//   * on each entered line broadcasts a SIGNED message onto the fabric via host::messages_send.
 //
-// This program does no I/O itself; message passing, the terminal, arguments, and self-replication are
-// all host primitives. Freestanding (no libc) so it stays small.
+// A message is NOT a copy of this program: host::messages_send transmits a small signed record (the
+// host stamps + signs our VERIFIED identity, so a chat handle can't be forged), so we no longer ship
+// the whole wasm binary per keystroke. The payload is a CBOR *list* - never a bare string - so one
+// primitive carries structured data; a lone line of text is sent as a one-element list [ "text" ].
+// A second, optional list element carries a small "kind" uint distinguishing system notices from
+// ordinary chat: kind 0 (or absent) = chat, 1 = join, 2 = leave. On start we broadcast a join notice
+// and on quit a leave notice, so peers see who comes and goes; both are rendered as "*** name ...".
+// Received messages land in this node's message store (host verifies the signature first) and we read
+// them back with host::messages_read, decoding each stored payload's first list element to display.
+//
+// This program does no I/O itself; message passing, the terminal, and arguments are host primitives.
+// Freestanding (no libc) so it stays small.
 
 // ---- host imports -----------------------------------------------------------------------------
 __attribute__((import_module("host"), import_name("arg_map_get")))
 int host_arg_map_get(const char* k, int kl, char* p, int cap);
-// Fill [ptr, ptr+len) with cryptographically-secure random bytes (a WASI module has no entropy of its
-// own); used to mint a per-message dedup nonce.
-__attribute__((import_module("host"), import_name("random")))
-int host_random(char* ptr, int len);
-// Append a message: id = per-message nonce for dedup, text = body. Host stamps the verified sender.
-__attribute__((import_module("host"), import_name("messages_push")))
-long long host_messages_push(const char* id, int idlen, const char* text, int textlen);
+// Broadcast a signed message: `p` is a CBOR list or map (NOT a bare string). The host mints a dedup
+// nonce, signs it with our verified identity, and fans it out onto the fabric. Returns 0 on success.
+__attribute__((import_module("host"), import_name("messages_send")))
+int host_messages_send(const char* p, int n);
 __attribute__((import_module("host"), import_name("messages_read")))
 int host_messages_read(long long after_seq, char* p, int cap);
-__attribute__((import_module("host"), import_name("replicate")))
-int host_replicate(int scope, const char* args, int len);
 
 __attribute__((import_module("host"), import_name("tty_available")))
 int host_tty_available(void);
@@ -52,24 +51,17 @@ enum { EV_CHAR=1, EV_ENTER=2, EV_BACKSPACE=3, EV_LEFT=4, EV_RIGHT=5, EV_UP=6, EV
        EV_CTRL_C=8, EV_CTRL_D=9, EV_ESC=10, EV_RESIZE=11 };
 // Message record keys (mirror crate::executor::message_keys).
 enum { K_SEQ=1, K_NAME=2, K_PUBKEY=3, K_EPOCH=4, K_TEXT=5 };
+// Payload "kind" (the optional 2nd list element): a plain line vs. a join/leave system notice.
+enum { KIND_CHAT=0, KIND_JOIN=1, KIND_LEAVE=2 };
 
 static int slen(const char* s){ int n=0; while(s[n]) n++; return n; }
 static void tprint(const char* s){ host_tty_print(s, slen(s)); }
 
 // ---- small helpers ----------------------------------------------------------------------------
-static char argbuf[1024];
 static const char* HEX = "0123456789abcdef";
 
-// A fresh 16-hex-char random nonce, used to deduplicate the several network copies of one message.
-static char idhex[32];
-static void gen_id(void) {
-  unsigned char r[8];
-  host_random((char*)r, 8);
-  for (int i = 0; i < 8; i++) { idhex[2*i] = HEX[r[i] >> 4]; idhex[2*i+1] = HEX[r[i] & 0xf]; }
-}
-
-// Decode one CBOR head at p; returns header length, sets *major and *val. (Same decoder as the
-// messages selftest; handles the uint/bytes/text/array/map items our records use.)
+// Decode one CBOR head at p; returns header length, sets *major and *val. (Handles the uint / bytes /
+// text / array / map items our records use.)
 static int chead(const unsigned char* p, int* major, unsigned long long* val){
   unsigned char ib=p[0]; *major=ib>>5; int ai=ib&0x1f;
   if(ai<24){*val=ai;return 1;}
@@ -79,7 +71,7 @@ static int chead(const unsigned char* p, int* major, unsigned long long* val){
   unsigned long long v=0; for(int i=0;i<8;i++) v=(v<<8)|p[1+i]; *val=v; return 9;
 }
 
-// ---- CBOR builder for replicate args ----------------------------------------------------------
+// ---- CBOR builder for the outgoing message list -----------------------------------------------
 static unsigned char cb[1024];
 static int cbn;
 static void cb_b(unsigned char x){ if(cbn<(int)sizeof(cb)) cb[cbn++]=x; }
@@ -90,22 +82,23 @@ static void cb_text(const char* s, int n){
   for(int i=0;i<n;i++) cb_b((unsigned char)s[i]);
 }
 
-// Broadcast the given text to the fabric by replicating a mode=deliver copy of ourselves. A fresh
-// random id rides along so every node collapses the several copies of this one message into one.
-static void send_line(const char* text, int tlen){
-  gen_id();
+// Broadcast a signed CBOR list [ "text" ] (chat) or [ "text", kind ] (join/leave). The host signs +
+// fans it out; we never transmit a copy of the program. A fresh dedup nonce is minted host-side.
+static void send_msg(const char* text, int tlen, int kind){
   cbn=0;
-  cb_b(0xa1);                 // map(1)
-  cb_b(0x02);                 // key 2 (arg_map, flattened k,v)
-  cb_b(0x86);                 // array(6)
-  cb_text("mode",4);
-  cb_text("deliver",7);
-  cb_text("text",4);
-  cb_text(text,tlen);
-  cb_text("id",2);
-  cb_text(idhex,16);
-  host_replicate(0, (const char*)cb, cbn);
+  if(kind==KIND_CHAT){
+    cb_b(0x81);            // array(1): [ text ] - keeps plain chat back-compatible
+    cb_text(text,tlen);   // element 0: the message text
+  } else {
+    cb_b(0x82);           // array(2): [ text, kind ] - a system notice
+    cb_text(text,tlen);   // element 0: descriptive text (unused when a kind is present)
+    cb_b((unsigned char)kind); // element 1: small uint kind (< 24, so a bare byte)
+  }
+  host_messages_send((const char*)cb, cbn);
 }
+static void send_line(const char* text, int tlen){ send_msg(text, tlen, KIND_CHAT); }
+static void send_join(void){ send_msg("joined", 6, KIND_JOIN); }
+static void send_leave(void){ send_msg("left", 4, KIND_LEAVE); }
 
 // ---- transcript state -------------------------------------------------------------------------
 #define MAXLINES 256
@@ -123,6 +116,21 @@ static void append_line(const char* s, int n){
 }
 
 static unsigned char rbuf[16384];
+
+// Append "name (pk8)" (sender identity) from the current record in rbuf into comp at *c.
+static void put_ident(char* comp, int* c, int nameP, int nameL, int pkP, int pkL){
+  for(int k=0;k<nameL && *c<LINEW-2;k++) comp[(*c)++]=rbuf[nameP+k];
+  if(pkP>=0 && pkL>0){
+    if(*c<LINEW-2) comp[(*c)++]=' ';
+    if(*c<LINEW-2) comp[(*c)++]='(';
+    for(int k=0;k<4 && k<pkL && *c<LINEW-2;k++){
+      unsigned char b=rbuf[pkP+k];
+      if(*c<LINEW-1) comp[(*c)++]=HEX[b>>4];
+      if(*c<LINEW-1) comp[(*c)++]=HEX[b&0xf];
+    }
+    if(*c<LINEW-2) comp[(*c)++]=')';
+  }
+}
 
 // Read any new messages (seq > *after) and fold them into the transcript. Returns 1 if anything new.
 static int poll_messages(long long* after){
@@ -149,21 +157,42 @@ static int poll_messages(long long* after){
         pos += (int)vv;
       }
     }
-    // Compose "name (pk8): text" into a single transcript line.
-    char comp[LINEW]; int c=0;
-    for(int k=0;k<nameL && c<LINEW-2;k++) comp[c++]=rbuf[nameP+k];
-    if(pkP>=0 && pkL>0){
-      if(c<LINEW-2) comp[c++]=' ';
-      if(c<LINEW-2) comp[c++]='(';
-      for(int k=0;k<4 && k<pkL && c<LINEW-2;k++){
-        unsigned char b=rbuf[pkP+k];
-        if(c<LINEW-1) comp[c++]=HEX[b>>4];
-        if(c<LINEW-1) comp[c++]=HEX[b&0xf];
+    // The stored TEXT is the sender's CBOR payload (a list). Display its first element (the text), and
+    // read an optional 2nd element (a small uint "kind") marking a join/leave notice. If the payload
+    // isn't a list-with-a-leading-string, fall back to showing the raw payload bytes.
+    int dispP=textP, dispL=textL, kind=KIND_CHAT;
+    if(textP>=0 && textL>=1){
+      int pmaj; unsigned long long pv2;
+      int h = chead(rbuf+textP,&pmaj,&pv2);
+      if(pmaj==4 && pv2>=1 && h<textL){
+        int emaj; unsigned long long ev;
+        int eh = chead(rbuf+textP+h,&emaj,&ev);
+        if((emaj==3 || emaj==2) && h+eh+(int)ev<=textL){ dispP=textP+h+eh; dispL=(int)ev; }
+        // Element 1 (if present) is the kind uint, right after element 0.
+        if(pv2>=2){
+          int off = h+eh+(int)ev;
+          if(off < textL){
+            int kmaj; unsigned long long kv;
+            chead(rbuf+textP+off,&kmaj,&kv);
+            if(kmaj==0) kind=(int)kv;
+          }
+        }
       }
-      if(c<LINEW-2) comp[c++]=')';
     }
-    if(c<LINEW-2){ comp[c++]=':'; comp[c++]=' '; }
-    for(int k=0;k<textL && c<LINEW;k++) comp[c++]=rbuf[textP+k];
+    // Compose the transcript line: a system notice "*** name (pk8) joined/left the chat" for join/leave,
+    // otherwise the ordinary "name (pk8): text".
+    char comp[LINEW]; int c=0;
+    if(kind==KIND_JOIN || kind==KIND_LEAVE){
+      const char* pre="*** ";
+      for(int k=0;pre[k] && c<LINEW;k++) comp[c++]=pre[k];
+      put_ident(comp,&c,nameP,nameL,pkP,pkL);
+      const char* verb=(kind==KIND_JOIN)?" joined the chat":" left the chat";
+      for(int k=0;verb[k] && c<LINEW;k++) comp[c++]=verb[k];
+    } else {
+      put_ident(comp,&c,nameP,nameL,pkP,pkL);
+      if(c<LINEW-2){ comp[c++]=':'; comp[c++]=' '; }
+      for(int k=0;k<dispL && c<LINEW;k++) comp[c++]=rbuf[dispP+k];
+    }
     append_line(comp,c);
     if(seq>*after) *after=seq;
     got=1;
@@ -211,7 +240,7 @@ static void redraw(void){
   host_tty_flush();
 }
 
-// ---- roles ------------------------------------------------------------------------------------
+// ---- main loop --------------------------------------------------------------------------------
 static char evbuf[16];
 
 static void ui_loop(void){
@@ -239,17 +268,9 @@ static void ui_loop(void){
 
 __attribute__((export_name("_start")))
 void _start(void){
-  int ml = host_arg_map_get("mode", 4, argbuf, (int)sizeof(argbuf));
-  int is_deliver = (ml==7 && argbuf[0]=='d' && argbuf[1]=='e');
-  if(is_deliver){
-    int il = host_arg_map_get("id", 2, idhex, (int)sizeof(idhex));
-    if(il<0) il=0;
-    int tl = host_arg_map_get("text", 4, argbuf, (int)sizeof(argbuf));
-    if(tl<0) tl=0;
-    host_messages_push(idhex, il, argbuf, tl);
-    return;
-  }
-  // ui role (default): requires a terminal.
+  // Interactive role only: requires a terminal. (Delivery is now a host primitive, not a program.)
   if(!host_tty_available()) return;
+  send_join();     // announce our arrival to the fabric
   ui_loop();
+  send_leave();    // announce our departure before the host tears the send sink down
 }
